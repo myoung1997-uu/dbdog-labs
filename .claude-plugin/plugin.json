@@ -1,5 +1,13 @@
 {
   "name": "dbdog-agent-obs",
-  "version": "0.20.6",
-  "description": "dbdog Agent Observability client hooks for Claude Code（mint → propagate → synthesize → sweep → graph（SessionEnd 自动出假设图到 dbdog-obs/graphs/<trace_id>/）；子代理内部调用可见，span 树三层。脚本本体在 claude-code-hooks/，hooks/hooks.json 经 ${CLAUDE_PLUGIN_ROOT} 引用；另带八个 skill：diag-flywheel（诊断飞轮客户端：沉淀用例 / 探针 / 判题包 / 重测对比 / 训练语料，用自己的 API key 直连 server）、diag-judge（单次判题：根因命中 / 证据 / 当前问题，class 与 tool/skill/case 两轴独立，必要时只读核实，不读取历史、不负责修复）、diag-run（口令「dbdog test loop N」：领 N 条待诊断的复现跑盲诊断,抢占防两轮重入,配 /loop 定时）、judge-run（驱动一轮判题：领「待判题」的诊断,按 diag-judge 的口径逐例判完回流,开判前推「判题中」、回流后推「已判」）、fix-run（第四棒：修一道题挖出的问题,确定是 bug 的按判定链重放定位自动修、部署、判断历史数据、在原窗口复测,打带复测结果的标记（复测通过即关）,要人定的逐条拍板,收尾告诉人建议点「复现 / 诊断 / 判题」里的哪一个、不自己触发重跑）、span-graph（hook span → 假设图,零模型,与 hook 同一实现）、evidence-chain（现象+根因+修复 → 反向真取证,五段式）、diag-compare（正反对比 → 六类结论 + dbdog 改进清单,跨单号聚合），见 skills/*/SKILL.md）"
+  "version": "0.21.0",
+  "description": "dbdog Agent Observability client hooks for Claude Code（mint → propagate → synthesize → sweep → graph（SessionEnd 自动出假设图到 dbdog-obs/graphs/<trace_id>/）；子代理内部调用可见，span 树三层。脚本本体在 claude-code-hooks/，hooks/hooks.json 经 ${CLAUDE_PLUGIN_ROOT} 引用；另带九个 skill：diag-flywheel（诊断飞轮客户端：沉淀用例 / 探针 / 判题包 / 重测对比 / 训练语料，用自己的 API key 直连 server）、diag-judge（单次判题：根因命中 / 证据 / 当前问题，class 与 tool/skill/case 两轴独立，必要时只读核实，不读取历史、不负责修复）、diag-run（口令「dbdog test loop N」：领 N 条待诊断的复现跑盲诊断,抢占防两轮重入,配 /loop 定时）、judge-run（驱动一轮判题：领「待判题」的诊断,按 diag-judge 的口径逐例判完回流,开判前推「判题中」、回流后推「已判」）、fix-run（第四棒：修一道题挖出的问题,确定是 bug 的按判定链重放定位自动修、部署、判断历史数据、在原窗口复测,打带复测结果的标记（复测通过即关）,要人定的逐条拍板,收尾告诉人建议点「复现 / 诊断 / 判题」里的哪一个、不自己触发重跑）、span-graph（hook span → 假设图,零模型,与 hook 同一实现）、evidence-chain（现象+根因+修复 → 反向真取证,五段式）、diag-compare（正反对比 → 六类结论 + dbdog 改进清单,跨单号聚合）、case-feed（给 dbdog 供题：把筛出来的、用来考验 dbdog 系统能力的用例（复现脚本 + manifest）推给用例平台。首次开会话自动开户并把材料包取回本地，之后每轮结束自动推发件箱；失败把平台错误清单回灌给 agent 自行修正。**材料不随插件分发**——用的时候现从平台取最新一份，所以平台改规矩不用发新版。不配 case_feed_url 就完全零行为，见 skills/*/SKILL.md）",
+  "userConfig": {
+    "case_feed_url": {
+      "type": "string",
+      "title": "用例平台地址（可选）",
+      "description": "要往 dbdog 用例平台供题时才填。填完整地址（带端口），形如 http://10.0.0.5:18888 或 http://<域名>:23234 —— 内网与外网是两套独立部署、各有各的库和凭证，填错不会报错、只会把用例推到另一个平台，所以刻意不给默认值。**不填 = 这个功能不启用**（不会有任何提示、不会往平台发任何请求）。脚本化安装可用环境变量 DBDOG_CASE_FEED_URL 覆盖（优先级更高）。",
+      "required": false
+    }
+  }
 }

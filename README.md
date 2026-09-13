@@ -46,6 +46,34 @@ hooks 路径由插件机制（`${CLAUDE_PLUGIN_ROOT}`）自动解析，不改任
 
 某个目录要全量记录：该目录 `.claude/settings.json` 加 `{ "env": { "DBDOG_OBS_MODE": "always" } }`。
 
+## 可选能力：给 dbdog 供题（`case-feed`）
+
+把筛出来的、用来考验 dbdog 系统能力的用例（复现脚本 + manifest）推给**用例平台**。
+**默认关着** —— 不配下面这个地址就完全零行为（不弹窗、不提示、每轮结束不输出任何东西）。
+
+| 变量 | 作用 | 必须？ |
+|------|------|--------|
+| `DBDOG_CASE_FEED_URL` | **用例平台**地址（不是 mcp 地址！）：`http://10.0.0.5:18888` 这种带端口的完整地址 | 要用才配 |
+| `DBDOG_CASE_FEED_TOKEN` | 已有的推送凭证：给了就跳过自动开户（已经接好的机器别重开号） | 否 |
+| `DBDOG_CASE_FEED_AGENT` | 身份名，默认 `<类别>-<机器名>` | 否 |
+| `DBDOG_CASE_FEED_DATA` | 运行时目录（材料包 + 凭证）。非 Claude 的 agent 用它指定，别塞进 `~/.claude/` | 否 |
+
+也可以不管环境变量，直接在**插件配置**里填 `case_feed_url`（启用插件时问的那一项）。
+
+配好之后：首次开会话自动开户 + 把材料包（规范 + 推用例的脚本）取回本地；之后**每轮结束自动推**
+发件箱（`<项目>/.dbdog-outbox/<批次>/`）里的用例；推失败会把平台的错误清单**回灌给 agent** 让它自己修。
+
+> ⚠️ **回灌每轮只发生一次**：第一次阻断之后 `stop_hook_active` 会翻真，后续的 Stop 直接返回
+> （这是防死循环的正确设计）。所以模型收到清单却不理会的话，**不会再有人提醒它** ——
+> 批次会一直留在发件箱里，直到下一轮有别的动静。想确认推没推成功，看那个批次目录还在不在
+> （成功会被移进 `sent/`）。
+
+> ⚠️ **内网、外网是两套独立部署**（不同机器/端口/凭证，各有各的库）。地址填错不会报错，
+> 只会把用例推到另一个平台 —— 所以刻意没有默认值。填哪套取决于这台机器该连哪套。
+>
+> 与 `diag-flywheel` 的区别：那个的「沉淀用例」是往 dbdog-server 存**考题**（评诊断能力）；
+> 这个是往用例平台推**复现用例**。不同系统、不同凭证。
+
 ## 验证（端到端）
 
 **开新会话** → 问题以「诊断:」开头正常提问 → 别中途打断 → 控制台
@@ -66,6 +94,8 @@ skills/judge-run/      judge-run skill：领待判题的诊断，按 diag-judge 
 skills/diag-judge/     diag-judge skill：单次判题——根因命中、证据、当前问题；class 与 tool/skill/case 两轴独立；正文和 references/output.md 分别定义方法与输出
 skills/fix-run/        fix-run skill：修一道题挖出的问题（第四棒）——bug 类自动修、部署、原窗口复测后打标记（复测通过即关），要人定的逐条拍板；不自己触发重跑
 skills/diag-compare/   diag-compare skill：正反两份产物对比 → 六类结论(无工具/应有结果但没有/结果不对/假设没提到/工具没调或调错/调对了但推理错)+ dbdog 改进清单,批次跨单号聚合 improvements.md
+skills/case-feed/      case-feed skill：给 dbdog 供题——筛出来的用例写进发件箱，钩子每轮自动推给用例平台（可选能力，不配 case_feed_url 就零行为）
+claude-code-hooks/case-feed/  case-feed 的两个钩子脚本（bootstrap 开户+取材料包 / push 推送+失败回灌）+ 单测
 ```
 
 母版历史：2026-07-14 从 dbdog-mcp `clients/claude-code-hooks/` 迁入并固定于此。

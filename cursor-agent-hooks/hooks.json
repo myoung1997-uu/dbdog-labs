@@ -43,6 +43,10 @@
       {
         "command": "node \"/ABSOLUTE/PATH/TO/dbdog-labs/cursor-agent-hooks/stop.mjs\"",
         "timeout": 15
+      },
+      {
+        "command": "node \"/ABSOLUTE/PATH/TO/dbdog-labs/claude-code-hooks/case-feed/push.mjs\"",
+        "timeout": 120
       }
     ],
     "subagentStart": [

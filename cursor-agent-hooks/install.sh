@@ -4,7 +4,9 @@ set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${DBDOG_CURSOR_HOOKS_TARGET:-$HOME/.cursor/hooks.json}"
-PLACEHOLDER='/ABSOLUTE/PATH/TO/dbdog-labs/cursor-agent-hooks'
+# 占位符是**仓根**（不是某个子目录）——这样 hooks.json 里指向不同目录的条目
+# （cursor-agent-hooks/*.mjs 与 claude-code-hooks/case-feed/push.mjs）一次 sed 全都能渲染。
+PLACEHOLDER='/ABSOLUTE/PATH/TO/dbdog-labs'
 
 if ! command -v node >/dev/null 2>&1; then
   echo "node >= 18 required" >&2
