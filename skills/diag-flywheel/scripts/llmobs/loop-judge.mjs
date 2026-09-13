@@ -43,7 +43,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnScript } from "./lib/spawn-script.mjs";
 import { runAgentCli } from "../e2e/lib/agent-cli.mjs";
-import { buildMcpConfig } from "../e2e/lib/e2e-agent.mjs";
+import { buildMcpConfig, normalizeMcpUrl } from "../e2e/lib/e2e-agent.mjs";
 import { judgeSessionArgs, judgeMcpUrl } from "./lib/judge-session.mjs";
 import { resolveDatasetTraces } from "./lib/dataset-traces.mjs";
 import { matchJudgeTargets, walkJudgeQueue } from "./lib/judge-queue.mjs";
@@ -85,7 +85,10 @@ const STALE_AFTER_SEC = Number(argOf("--stale-after-sec", String(TIMEOUT_SEC * 2
 // 判题这一侧**逐条真的在开跑那一刻检查**：它本来就是「判完一条再领下一条」。
 // 判官要连 MCP 去活系统主动查证（在线判是默认），MCP 不通时它只能照包里那份判，
 // 而那会把「查不到」判成「模型没想到查」——正是这道门要拦的。
-const MCP_URL = argOf("--mcp-url", process.env.DBDOG_MCP_URL || "");
+// 守门探的地址与判题会话连的地址**必须是同一个**：裸地址（无路径）先按 MCP 入口补 `/mcp`，再补 `llmobs` toolset。
+// 2026-09-13 实测过分叉的样子：会话那份在 buildMcpConfig 里补了 `/mcp`，守门却拿原始裸地址去 initialize，
+// 吃 404 后把这一条标成 mcp_unreachable——环境明明是通的，队列却永远不消。
+const MCP_URL = judgeMcpUrl(normalizeMcpUrl(argOf("--mcp-url", process.env.DBDOG_MCP_URL || "")));
 const MCP_BEARER = process.env.DBDOG_MCP_BEARER || "";
 const SYNC_CMD = argOf("--sync-cmd", process.env.DBDOG_LOOP_SYNC_CMD || "");
 /**
@@ -139,7 +142,7 @@ try {
 // MCP 配置写一份给所有判题会话共用（与诊断会话同一份 buildMcpConfig，连的是同一个 dbdog）。
 // 判题连的不是诊断那份地址——要补上 llmobs toolset（见 lib/judge-session.mjs 的 judgeMcpUrl）。
 const mcpConfigPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "judge-mcp-")), "mcp.json");
-process.env.DBDOG_MCP_URL = judgeMcpUrl(process.env.DBDOG_MCP_URL ?? "");
+process.env.DBDOG_MCP_URL = MCP_URL;
 fs.writeFileSync(mcpConfigPath, JSON.stringify(buildMcpConfig(), null, 2));
 if (!process.env.DBDOG_MCP_BEARER?.trim()) {
   // 边缘口有 OAuth 门禁，headless 起的会话读不到交互式客户端的登录态——没 bearer 就是连不上，

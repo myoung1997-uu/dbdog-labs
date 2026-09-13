@@ -42,6 +42,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnScript } from "./lib/spawn-script.mjs";
+import { normalizeMcpUrl } from "../e2e/lib/e2e-agent.mjs";
 import { loadDataset } from "./lib/exp-client.mjs";
 import {
   DIAG_DIAGNOSING,
@@ -86,7 +87,9 @@ const CONCURRENCY = Math.max(1, Number(argOf("--concurrency", "3")) || 3);
 
 // ---- 开跑前守门的三个旋钮（owner 2026-09-12）----
 // MCP 地址与凭证复用探针那两个 env（同一个 server，不另立一套名字）。
-const MCP_URL = argOf("--mcp-url", process.env.DBDOG_MCP_URL || "");
+// 守门探的地址与考生会话连的地址必须是同一个：裸地址先按 MCP 入口补 `/mcp`（run-experiment 里 buildMcpConfig 也这么补）。
+const MCP_URL = normalizeMcpUrl(argOf("--mcp-url", process.env.DBDOG_MCP_URL || ""));
+if (MCP_URL) process.env.DBDOG_MCP_URL = MCP_URL;
 const MCP_BEARER = process.env.DBDOG_MCP_BEARER || "";
 // 同步考生那份代码的命令。**不内置默认值**：装机形态与配置目录都因机器而异，
 // 写死一条在这儿等于把一个会漂的事实钉成第二个真相源。没给就跳过这一项并告警。
