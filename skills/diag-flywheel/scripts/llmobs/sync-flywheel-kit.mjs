@@ -49,6 +49,9 @@ const ENTRIES = [
   "scripts/llmobs/loop-pending.mjs",
   "scripts/llmobs/case-history.mjs",
   "scripts/llmobs/fix-mark.mjs",
+  // 2026-09-13 加修复那一棒的取材脚本（飞轮 §14.3）：fix-run skill 正文直接让人跑它（`$S/llmobs/…`），
+  // 不镜像就是文档指着一个插件里没有的文件。闭包会带上它独有的 lib/fix-context.mjs。
+  "scripts/llmobs/fix-context.mjs",
   // 2026-09-11 加两条 loop 的入口：它们此前只在源码仓里，于是别人要跑就得 clone 整个 mcp
   // 仓只为拿两个文件（那台机器上的 runner 靠一个 MCP_REPO 变量指过去）。进了镜像之后，
   // 装了插件就有脚本，MCP_REPO 这个变量整个消失。

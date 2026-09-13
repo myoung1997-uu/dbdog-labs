@@ -3,14 +3,15 @@
 // ## 为什么这张表比再加十条 rubric 规则更值钱
 //
 // 分类体系是不是写清楚了，唯一的检验是**两个判官（或同一判官两次）判得像不像**。MAST 那份
-// 14 类的多智能体失败分类，是靠人工双标 + Cohen's κ=0.88 验收的；我们这套五类（现六类）
+// 14 类的多智能体失败分类，是靠人工双标 + Cohen's κ=0.88 验收的；我们这套（现两类 × 四种决定）
 // 从来没量过——于是「该改哪一类的定义」只能靠读感排优先级。κ 低的那一类就是定义最糊的那一类。
 //
 // ## 三件事分开报，不合成一个数
 //
 // · `verdict` / `evidence`：分类一致性，用 Cohen's κ（扣掉「瞎猜也能蒙对」的那部分）；
-// · 改进点类别：判官提的条目本来就不会一一对应，所以不按条配对，按**这一例提到了哪些类别**
-//   算集合重合度（Jaccard）；
+// · 问题类别：判官提的条目本来就不会一一对应，所以不按条配对，按**这一例提到了哪些类别**
+//   算集合重合度（Jaccard）。token 用 `class`，要人定的再带上定的是哪一种
+//   （`true_bug` / `needs_decision/wording` / …）——只比两个 class 的话，粒度粗到几乎恒等于 1；
 // · **弃判率两边各报各的**：它不是一致率的一部分。两边都不敢判，一致率会很好看，
 //   但那说明的是「判不动」，不是「判得准」——rubric 判题的一致性测量惯例也要求单列。
 //
@@ -46,12 +47,18 @@ export function cohensKappa(pairs) {
   return { kappa, observed, expected, n, ...(n < 20 ? { note: `样本只有 ${n} 例，κ 在小样本上极不稳，只当参考` } : {}) };
 }
 
-const kindSetOf = (labels) => {
+/** 一例的类别集合：`true_bug`，或要人定的 `needs_decision/<decision>`。弃判那一档不进集合（另行单列）。 */
+const classTokensOf = (labels) => {
   const { items } = normalizeFindings(labels?.findings);
-  return new Set(items.map((it) => it?.kind).filter((k) => k && k !== "unsure"));
+  const out = new Set();
+  for (const it of items) {
+    if (it?.class === "true_bug") out.add("true_bug");
+    else if (it?.class === "needs_decision" && it?.decision && it.decision !== "is_bug") out.add(`needs_decision/${it.decision}`);
+  }
+  return out;
 };
 
-/** 两边都空时回 null：那是「这一例谁都没提改进点」，算成 1.0 会把判不出来美化成完全一致。 */
+/** 两边都空时回 null：那是「这一例谁都没提问题」，算成 1.0 会把判不出来美化成完全一致。 */
 const jaccard = (a, b) => {
   if (a.size === 0 && b.size === 0) return null;
   let inter = 0;
@@ -80,12 +87,12 @@ export function agreementReport(rowsA, rowsB) {
   const verdictPairs = [];
   const evidencePairs = [];
   const jaccards = [];
-  let bothEmpty = 0;   // 两边都没提改进点的例子：单独数，不混进平均
+  let bothEmpty = 0;   // 两边都没提问题的例子：单独数，不混进平均
   for (const t of shared) {
     const a = byA.get(t).labels ?? {}; const b = byB.get(t).labels ?? {};
     if (a.verdict != null && b.verdict != null) verdictPairs.push([a.verdict, b.verdict]);
     if (a.evidence != null && b.evidence != null) evidencePairs.push([a.evidence, b.evidence]);
-    const j = jaccard(kindSetOf(a), kindSetOf(b));
+    const j = jaccard(classTokensOf(a), classTokensOf(b));
     if (j === null) bothEmpty += 1; else jaccards.push(j);
   }
 
@@ -95,7 +102,7 @@ export function agreementReport(rowsA, rowsB) {
     only_b: [...byB.keys()].filter((t) => !byA.has(t)),
     verdict: cohensKappa(verdictPairs),
     evidence: cohensKappa(evidencePairs),
-    kinds: {
+    classes: {
       jaccard: jaccards.length ? jaccards.reduce((x, y) => x + y, 0) / jaccards.length : null,
       n: jaccards.length,
       both_empty: bothEmpty,

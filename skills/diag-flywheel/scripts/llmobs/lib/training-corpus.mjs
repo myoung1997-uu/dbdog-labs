@@ -1,7 +1,7 @@
 // training-corpus.mjs — 训练语料的**纯函数**层（选样口径、样本形状），零 I/O、零 fetch。
 //
 // 单源关系（军规 3）：
-//   · 选样口径 = dbdog-web `docs/design/llmobs-diag-flywheel.md` D4（2026-09-11 版：证据撑得住 + 没有工具错 = 能当训练样本），
+//   · 选样口径 = dbdog-web `docs/design/llmobs-diag-flywheel.md` D4（证据撑得住 + 没有确定的 bug = 能当训练样本），
 //     这里只把 D4 翻译成判据，不另立口径。
 //   · 标签落到 span 上的键名 = 设计 §7.2 的服务端投影（root span 的 `evaluation.*` tag），
 //     server 侧单源在 `internal/api/llmobs_annotation_projection.go`。
@@ -11,8 +11,8 @@ import { hypothesisTreeJson, rootSpanOf, stampOf } from "./judge-package.mjs";
 import { subagentSpans } from "./orchestration-metrics.mjs";
 
 /**
- * root span 上的 `evaluation.*` tag 键（设计 §7.2 投影出来的三个，2026-09-11 改版）。
- * CH 的 tags 是 `Map(String,String)` ⇒ 改进点类别到了这里是逗号连接的一串——**不是数组**，别直接当数组用。
+ * root span 上的 `evaluation.*` tag 键（设计 §7.2 投影出来的三个）。
+ * CH 的 tags 是 `Map(String,String)` ⇒ 问题类别到了这里是逗号连接的一串——**不是数组**，别直接当数组用。
  */
 export const EVAL_TAG_KEYS = {
   verdict: "evaluation.verdict",
@@ -40,19 +40,19 @@ export function evaluationOf(span) {
  *
  * · 没判（没有 verdict）→ 不收：判了一半的样本进训练集，等于把「不知道」当成「没问题」。
  * · 证据撑不住（`evidence=weak`）→ 不收：结论对也是蒙的，学它就是学蒙。证据没判也不收（同上一条理由）。
- * · 有工具错（`finding_kinds` 含 `tool`）→ dbdog 返回过错值 / 空 / 报错，默认不收；
+ * · 有确定的 bug（`finding_kinds` 含 `true_bug`）→ dbdog 返回过错值 / 空 / 报错，且判官核实过，默认不收；
  *   `--include-tool-errors` 时收成 `dbdog_gap`（trace 还能用，只是当训练样本要知道它带着已知缺口）。
  * · 其余 → `model`：纯模型 + prompt 行为样本，不论对错都进（D4 owner 原话：不同反应都是样本）。
- *   skill / model / scaffold / case / unsure 这几类改进点不影响收不收——它们说的是模型或题怎么样，不是数据假不假。
+ *   「要人定」那一类不影响收不收——它说的是话写得怎么样、题怎么样、还没定，不是数据假不假。
  */
 export function selectSample(span, { includeToolErrors = false } = {}) {
   const ev = evaluationOf(span);
   if (!ev.verdict) return { keep: false, reason: "unjudged", evaluation: ev };
   if (ev.evidence !== "solid") return { keep: false, reason: ev.evidence === "weak" ? "weak_evidence" : "evidence_unjudged", evaluation: ev };
-  if (ev.kinds.includes("tool")) {
+  if (ev.kinds.includes("true_bug")) {
     return includeToolErrors
       ? { keep: true, sample_kind: "dbdog_gap", reason: "", evaluation: ev }
-      : { keep: false, reason: "tool_error", evaluation: ev };
+      : { keep: false, reason: "true_bug", evaluation: ev };
   }
   return { keep: true, sample_kind: "model", reason: "", evaluation: ev };
 }

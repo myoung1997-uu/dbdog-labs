@@ -77,11 +77,11 @@ node $S/llmobs/judge-package-import.mjs --package ./pkg --annotator <判题模�
 ```
 
 `--annotator` 必填:两轮结论不一样时,得分得清是 agent 变了还是判题换了。
-判卷回答三件事:**结论对不对**(对 / 部分对 / 错 / 判不了)、**证据撑不撑得住**、**改进点一条一条**
-(`findings.items`,每条带稳定 key 与类别:工具错 / skill 错 / 模型抽风 / 编排错 / 题有问题 / 判不出要人看),
+判卷回答三件事:**结论对不对**(对 / 部分对 / 错 / 判不了)、**证据撑不撑得住**、**问题一条一条**
+(`findings.items`,每条带稳定 key,只分两类:确定是 bug——判官自己核实了是确定性的,交判定链 / 要人定——说法会误导、缺能力、题目有问题、看不出是不是 bug,交全部上下文),
 之前几轮提过的写复验(`findings.checks`);一段话塞好几处改动、或 2026-09-11 之前的「可信 / 要修 / 蒙对」词表,import 会整包拒。
 
-修完一条改进点,先打标记再重跑验证(标记是声明,复验才是判决):
+修完一条问题(修复走 `fix-run` skill,以用例为维度),先打标记再重跑验证(标记是声明,复验才是判决):
 
 ```bash
 node $S/llmobs/fix-mark.mjs --trace <挖出它的 trace_id> --key <改进点 key> --status claimed_fixed --note "改了什么" --by <谁>
@@ -120,8 +120,8 @@ node $S/llmobs/run-experiment.mjs --experiment blocking-b --parent blocking-a \
 node $S/llmobs/training-corpus-export.mjs --out ./corpus [--from ... --to ...]
 ```
 
-只收「判过、证据撑得住、且没有工具错」的 trace——不论结论对错,那都是模型 + prompt 行为的样本。
-有工具错的要收就加 `--include-tool-errors`(打成 dbdog_gap)。被排除的理由会写进 manifest。
+只收「判过、证据撑得住、且没有确定是 bug 的问题」的 trace——不论结论对错,那都是模型 + prompt 行为的样本。
+有 bug 的要收就加 `--include-tool-errors`(打成 dbdog_gap)。被排除的理由会写进 manifest。
 
 ## 几个会踩的点
 

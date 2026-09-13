@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// judge-scorecard.mjs — 判官自己的成绩单：产量、弃判率、无效条目率、复验漏没漏。
+// judge-scorecard.mjs — 判官自己的成绩单：产量（两类各几条）、弃判率、无效条目率、复验漏没漏。
 //
 // ## 为什么 KPI 光看「挖出几条」不够
 //
-// 这条 loop 的产出是「dbdog 要修的条目」，但**产量不等于有效**。Tricorder（Google 的静态分析
+// 这条 loop 的产出是「要修的条目」与「要人定的条目」，但**产量不等于有效**。Tricorder（Google 的静态分析
 // 平台）的经验很硬：误报率一过 ~10%，开发者就整体不看那个分析器了。我们有现成的投票——修的人
 // 打的 `wont_fix`。把它算出来，「挖出 N 条」才是奖励有效性而不是奖励产量。
 //
 // 另外两个数同样要单列：
-//   · **弃判率**：两边都不敢判也能凑出很好看的产量；
+//   · **弃判率**（要人定里「看不出是不是 bug」那一档）：不敢判也能凑出很好看的产量；
 //   · **复验覆盖率**：rubric 写着「还没关的一条都不许漏」，但校验器只查每条 check 的形状、
 //     不查覆盖率。漏验三条与「这三条真没修好」在页面上长得一模一样。
 //
@@ -58,20 +58,33 @@ const total = {
   rounds: sum((r) => r.rounds),
   items_total: sum((r) => r.items_total),
   abstained: sum((r) => Math.round(r.abstention_rate * r.items_total)),
+  // 判官说「这条要人定」的条目数，与修的人打 needs_human 标记的条目数——**分开报，不相加**
+  needs_decision_items: sum((r) => r.needs_decision_items),
+  needs_human_marks: sum((r) => r.needs_human_marks),
   marked: sum((r) => r.marked),
   wont_fix: sum((r) => r.wont_fix),
   check_due: sum((r) => r.check_coverage.due),
   check_missed: sum((r) => r.check_coverage.missed.length),
   open_now: sum((r) => r.open_now),
 };
-const byKind = {};
-for (const c of perCase) for (const [k, n] of Object.entries(c.report.by_kind)) byKind[k] = (byKind[k] ?? 0) + n;
+const byClass = {};
+const byDecision = {};
+for (const c of perCase) {
+  for (const [k, n] of Object.entries(c.report.by_class)) byClass[k] = (byClass[k] ?? 0) + n;
+  for (const [k, n] of Object.entries(c.report.by_decision)) byDecision[k] = (byDecision[k] ?? 0) + n;
+}
 
-process.stdout.write(`${JSON.stringify({ dataset: DATASET, total, by_kind: byKind, cases: perCase }, null, 1)}\n`);
+process.stdout.write(`${JSON.stringify({ dataset: DATASET, total, by_class: byClass, by_decision: byDecision, cases: perCase }, null, 1)}\n`);
+
+const ZH_CLASS = { true_bug: "确定是 bug", needs_decision: "要人定" };
+const ZH_DECISION = { wording: "说法会误导", capability: "缺能力", case: "题目有问题", is_bug: "看不出是不是 bug" };
 
 console.error(`\n== 判官成绩单 · ${DATASET} ==`);
-console.error(`· 判过 ${total.cases} 道题 / ${total.rounds} 轮，提出改进点 ${total.items_total} 条：${Object.entries(byKind).map(([k, n]) => `${k} ${n}`).join(" · ")}`);
-console.error(`· 弃判率 ${pct(total.items_total ? total.abstained / total.items_total : 0)}（这些是要人核的，不是挖到的缺陷）`);
+console.error(`· 判过 ${total.cases} 道题 / ${total.rounds} 轮，提出问题 ${total.items_total} 条：`
+  + `${Object.entries(byClass).map(([k, n]) => `${ZH_CLASS[k] ?? k} ${n}`).join(" · ")}`
+  + `${Object.keys(byDecision).length ? `（要人定拆开：${Object.entries(byDecision).map(([k, n]) => `${ZH_DECISION[k] ?? k} ${n}`).join(" · ")}）` : ""}`);
+console.error(`· 弃判率 ${pct(total.items_total ? total.abstained / total.items_total : 0)}（「看不出是不是 bug」那一档：要人去核，不是挖到的 bug）`);
+console.error(`· 要人的两个数不相加：判官说要人定 ${total.needs_decision_items} 条 · 修的人说要人协助 ${total.needs_human_marks} 条`);
 console.error(`· 无效条目率 ${pct(total.marked ? total.wont_fix / total.marked : null)}（分母是被修的人标过的 ${total.marked} 条；超 10% 就该回头改 rubric，不是催判官多提）`);
 console.error(`· 复验：该验 ${total.check_due} 条，漏验 ${total.check_missed} 条${total.check_missed ? "  ← 漏验与「真没修好」在页面上长得一样" : ""}`);
 console.error(`· 现在还开着 ${total.open_now} 条`);

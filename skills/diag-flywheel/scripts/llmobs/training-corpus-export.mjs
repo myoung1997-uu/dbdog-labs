@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // training-corpus-export.mjs — 把判过的诊断 trace 导成训练语料（飞轮 P4「收口」，设计 §4 P4 行）。
 //
-// 为什么筛这一档（D4，2026-09-11 版）：「这条 trace 还能用来干什么」是从判题结果算出来的。
-//   判过 + 证据撑得住 + 没有工具错 = 纯模型 + prompt 的行为样本，**不论对错都是样本**（owner：不同反应没有 true bug）；
-//   有工具错 = dbdog 返回过错值 / 空 / 报错——要收就得知道它带着已知缺口（`--include-tool-errors`，打成 dbdog_gap）；
+// 为什么筛这一档（D4）：「这条 trace 还能用来干什么」是从判题结果算出来的。
+//   判过 + 证据撑得住 + 没有确定的 bug = 纯模型 + prompt 的行为样本，**不论对错都是样本**（owner：不同反应没有 true bug）；
+//   有确定的 bug = dbdog 返回过错值 / 空 / 报错且判官核实过——要收就得知道它带着已知缺口（`--include-tool-errors`，打成 dbdog_gap）；
 //   证据撑不住 = 结论是蒙的，学它就是学蒙，排除；没判 / 证据没判 = 判了一半，排除。
 // 判据只认**服务端投影到 root span 上的 `evaluation.*` tag**（设计 §7.2）——分数是投影、批注是原件，
 // 筛选走投影（能下推到 CH 检索），原件随样本一起带走（`judge` 字段）。
@@ -97,7 +97,7 @@ if (DATASET) {
   console.error(`用例集 ${DATASET}（${datasetScope.records.length} 条题、${datasetScope.traceIds.size} 次诊断）：${before} → ${roots.length} 条`);
 }
 
-const excluded = { unjudged: 0, weak_evidence: 0, evidence_unjudged: 0, tool_error: 0, no_trace: 0 };
+const excluded = { unjudged: 0, weak_evidence: 0, evidence_unjudged: 0, true_bug: 0, no_trace: 0 };
 const picked = [];
 for (const root of roots) {
   const pick = selectSample(root, { includeToolErrors: INCLUDE_TOOL_ERRORS });
@@ -152,7 +152,7 @@ const manifest = {
     from: FROM, to: TO, ml_app: ML_APP || null,
     include_tool_errors: INCLUDE_TOOL_ERRORS,
     server_query: query,
-    client_filter: "evaluation.verdict 判过，且 evaluation.finding_kinds 不含 tool（D4 2026-09-11 版）",
+    client_filter: "evaluation.verdict 判过、evaluation.evidence 撑得住，且 evaluation.finding_kinds 不含 true_bug（D4）",
     page_limit: PAGE_LIMIT,
   },
   counts: {

@@ -20,7 +20,7 @@
 //                        /reverse.md|.json  反向证据链（record.metadata.reverse_chain；缺则不产）
 //                        /ground-truth.md   答案纸（expected_output；缺则不产 = 无参照题）
 //                        /probe.json    探针结果（由 probe.mjs 写；已有则原样保留）
-//                        /prior-judgments.json  这道题**之前几轮**的判题（改进点 items、复验 checks、修复标记，旧的在前）；
+//                        /prior-judgments.json  这道题**之前几轮**的判题（问题 items、复验 checks、修复标记，旧的在前）；
 //                                       判这一轮时逐条复验还没关的（飞轮设计 §13.3）。空数组 = 之前没判过
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -341,12 +341,12 @@ fs.writeFileSync(path.join(OUT, "skill", "README.md"), `# 在蓝区离线判这�
 2. 把 \`SKILL.md\`（本目录）当 rubric，逐例读 \`../cases/<event_id>/\` 下的四件套：
    \`forward.md\`（agent 实际走的路）、\`reverse.md\`（本该走的路 + 真取到的证据）、
    \`ground-truth.md\`（答案纸；不存在 = 无参照题，\`verdict\` 填 \`unknown\`）、
-   \`probe.json\`（探针结果；不存在 = 没跑，「工具错」只能靠 trace 内两两对照抓）、
-   \`prior-judgments.json\`（这道题之前几轮提过的改进点、复验与修复标记；还没关的每一条都要在 \`findings.checks\` 里复验）。
+   \`probe.json\`（探针结果；不存在 = 没跑，「确定是 bug」只能靠 trace 内两两对照抓，多半只够判到「看不出是不是 bug」）、
+   \`prior-judgments.json\`（这道题之前几轮提过的问题、复验与修复标记；还没关的每一条都要在 \`findings.checks\` 里复验）。
    \`trace.json\` 是 server 导出的原样 span，需要抠细节时看它。
 3. 产两个文件写到**包根**（不是本目录）：
    - \`annotations.jsonl\`：每例一行 \`{"trace_id":"…","labels":{…}}\`，形状见 SKILL.md；
-   - \`summary.md\`：本轮总账（判了几例、结论与证据的分布、改进点按 \`key\` 聚合的清单（带类别）、本轮复验几条修好 / 仍在、最该先修的三条、判不动的地方）。
+   - \`summary.md\`：本轮总账（判了几例、结论与证据的分布、问题按 \`key\` 聚合的清单（带类别：确定是 bug / 要人定）、本轮复验几条修好 / 仍在、最该先修的三条、判不动的地方）。
    改了反向链就把修订写到 \`reverse-chain-revisions/<record_id>.md\`（和 \`.json\`）。
 
 ## 回黄区之后
@@ -369,13 +369,13 @@ console.error(`✓ 判题包：${path.resolve(OUT)}（${cases.length} 例，队�
 console.error(`  label：${manifest.label_schema.length} 条${manifest.label_schema.length < LABEL_SCHEMA.length ? "（不全，见上面的警告）" : ""}`);
 if (noTrace) console.error(`  ⚠ ${noTrace} 例没有 trace——这几例只有答案纸，判不了行为`);
 const noProbe = cases.filter((c) => c.missing.some((m) => m.startsWith("probe"))).length;
-if (noProbe) console.error(`  ⚠ ${noProbe} 例没有探针结果，「工具错」只能靠 trace 内两两对照抓（D2：探针是抓工具错最硬的证据）`);
+if (noProbe) console.error(`  ⚠ ${noProbe} 例没有探针结果，「确定是 bug」只能靠 trace 内两两对照抓（D2：探针是抓 dbdog 侧错最硬的证据）`);
 // 没有答案纸的要单独、响亮地报：这不是材料少一件，是这道题本身该回炉。
 const noGT = cases.filter((c) => c.missing.some((m) => m.startsWith("ground-truth")));
 if (noGT.length) {
   console.error("");
   console.error(`  ⚠⚠ ${noGT.length} 例没有答案纸——这几道题坏了，不是「无参照题」：`);
   for (const c of noGT) console.error(`       ${c.event_id}（record ${c.record_id || "?"}）`);
-  console.error("       判题时只能判工具对错：verdict 填 unknown，改进点必记一条 case 类「这道题没有答案纸」。");
+  console.error("       判题时只能判 dbdog 给得对不对：verdict 填 unknown，问题必记一条要人定·题目有问题「这道题没有答案纸」。");
   console.error("       修法：回建用例那一步，从 issue 正文或它对应的已合入的 PR 取根因；两处都没有就删题。");
 }

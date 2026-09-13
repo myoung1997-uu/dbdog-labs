@@ -4,7 +4,7 @@
 // ## 这是改 rubric 之前该先跑的那一步
 //
 // 分类体系写没写清，唯一的检验是两个判官（或同一判官两次）判得像不像。MAST 那份 14 类的
-// 多智能体失败分类是靠人工双标 + κ=0.88 验收的；我们这套从来没量过，于是「该改哪一类的定义」
+// 多智能体失败分类是靠人工双标 + κ=0.88 验收的；我们这套（两类 × 四种决定）从来没量过，于是「该改哪一类的定义」
 // 只能靠读感排。**κ 低的那一类就是定义最糊的那一类**，先量再改，比一次性改十条稳。
 //
 // 怎么产生第二份判题：同一批包判两遍（第二遍加 `--keep-package` 留住目录），或换一个判官模型判一遍。
@@ -13,7 +13,7 @@
 // 用法：
 //   node scripts/llmobs/judge-agreement.mjs --a <包目录|annotations.jsonl> --b <同左>
 //
-// 输出：stdout 一个 JSON（verdict / evidence 各一份 κ、改进点类别的集合重合度、两边各自的弃判率）。
+// 输出：stdout 一个 JSON（verdict / evidence 各一份 κ、问题类别的集合重合度、两边各自的弃判率）。
 // 判读：κ ≥ 0.8 很好；0.6–0.8 尚可；< 0.6 就是那一轴的定义没写清——去改 rubric 的那一节，别改判官。
 import fs from "node:fs";
 import path from "node:path";
@@ -44,5 +44,6 @@ const line = (name, r) => `· ${name}：κ=${r.kappa === null ? "—" : r.kappa.
 console.error(`\n配对 ${report.paired} 例（只 a 有 ${report.only_a.length} · 只 b 有 ${report.only_b.length}）`);
 console.error(line("verdict", report.verdict));
 console.error(line("evidence", report.evidence));
-console.error(`· 改进点类别重合度：${report.kinds.jaccard === null ? "—" : report.kinds.jaccard.toFixed(3)}（按 ${report.kinds.n} 例算${report.kinds.both_empty ? `；另有 ${report.kinds.both_empty} 例两边都没提改进点，没算进去` : ""}）`);
-console.error(`· 弃判率：a ${(report.abstention.a * 100).toFixed(1)}% · b ${(report.abstention.b * 100).toFixed(1)}%（单列：两边都不敢判也能凑出很像的一致率）`);
+console.error(`· 问题类别重合度（确定是 bug / 要人定·各种）：${report.classes.jaccard === null ? "—" : report.classes.jaccard.toFixed(3)}`
+  + `（按 ${report.classes.n} 例算${report.classes.both_empty ? `；另有 ${report.classes.both_empty} 例两边都没提问题，没算进去` : ""}）`);
+console.error(`· 弃判率（「看不出是不是 bug」那一档）：a ${(report.abstention.a * 100).toFixed(1)}% · b ${(report.abstention.b * 100).toFixed(1)}%（单列：两边都不敢判也能凑出很像的一致率）`);

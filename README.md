@@ -60,6 +60,11 @@ hooks/hooks.json    插件 hooks 定义（${CLAUDE_PLUGIN_ROOT} 引用脚本）
 claude-code-hooks/  脚本本体 + 研发 README（含手动接线的历史方式与自检命令）
 skills/span-graph/     span-graph skill：hook span → 假设图 markdown（零模型），入口 scripts/from_spans.mjs（实现在 claude-code-hooks/hypothesis-graph.mjs，SessionEnd 自动出图同一实现）
 skills/evidence-chain/ evidence-chain skill：现象 + 根因 + 修复 diff + 源码树 → 应有证据链与 dbdog 工具缺口 markdown，入口 scripts/run.py（调 claude -p）
+skills/diag-flywheel/  diag-flywheel skill：诊断飞轮客户端脚本（沉淀用例 / 探针 / 判题包导出回流 / 重测对比 / 训练语料），scripts/ 是 dbdog-mcp scripts/llmobs 的镜像
+skills/diag-run/       diag-run skill：口令「dbdog test loop N」，领待诊断的复现跑盲诊断（第二棒）
+skills/judge-run/      judge-run skill：领待判题的诊断，按 diag-judge 判完回流（第三棒；`/loop 30m /judge-run`）
+skills/diag-judge/     diag-judge skill：判卷口径——结论按根因集合算、证据撑不撑得住、问题只分两类（确定是 bug / 要人定）
+skills/fix-run/        fix-run skill：修一道题挖出的问题（第四棒）——bug 类自动修、要人定的逐条拍板，改完打标记等重复现
 skills/diag-compare/   diag-compare skill：正反两份产物对比 → 六类结论(无工具/应有结果但没有/结果不对/假设没提到/工具没调或调错/调对了但推理错)+ dbdog 改进清单,批次跨单号聚合 improvements.md
 ```
 

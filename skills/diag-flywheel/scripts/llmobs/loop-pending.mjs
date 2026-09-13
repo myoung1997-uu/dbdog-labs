@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // loop-pending.mjs — 三条 loop 的「有没有新增要处理的」检测（飞轮 §12 / 控制台 §6c）。
 //
-// 同事把评测跑成三条自动化 loop（owner 2026-09-10）：
+// 飞轮四棒，每一棒的第一步都是「哪些还没轮到我」，这就是本脚本：
 //   ① 爬 QA → 建用例（REST 直接提交，不需要本脚本）
-//   ② 检测新增用例 → 逐条跑**盲**诊断
-//   ③ 检测新增诊断 → 判题
-// ②③ 的第一步都是「哪些还没轮到我」，这就是本脚本。
+//   ② 检测新增用例 → 逐条跑**盲**诊断（`--kind run`）
+//   ③ 检测新增诊断 → 判题（`--kind judge`）
+//   ④ 检测判出来还没修的 → 修复（`--kind fix`，飞轮 §14）
 //
 // 为什么是客户端算而不是服务端加接口：这个判定要跨 PG（records）与 CH（events/spans），
 // 服务端做要开一条新的联查路由；而客户端三跳就够，慢的是 events 那一跳（一个 run 一次请求）。
@@ -13,18 +13,21 @@
 //
 // 用法：
 //   node scripts/llmobs/loop-pending.mjs --dataset daily-diag [--project default-project]
-//     [--kind run|judge|both] [--json]
+//     [--kind run|judge|fix|both] [--json]
 //
 //     --kind run    只列「复现过、但还没诊断」的用例 → 喂给 loop ②
 //                   （没复现过的另列一桶 waiting_repro：现场不存在，发题只会空转）
 //     --kind judge  只列「跑过但没判」的诊断    → 喂给 loop ③
-//     --kind both   两样都列（默认）
+//     --kind fix    只列「判过、还有没关的问题、且至少一条没人接」的用例 → 喂给 fix-run
+//     --kind both   三样都列（默认）
 //     --json        出机器可读的 JSON（loop 脚本用这个）
 //
 // env：DBDOG_BASE_URL + DBDOG_API_KEY（或装 hooks 时配的 DBDOG_OBS_API_KEY）。
-import { CP, call, requireCredential } from "./lib/exp-client.mjs";
+import { CP, call, findAllAnnotationsByContent, requireCredential } from "./lib/exp-client.mjs";
 import { resolveDatasetTraces } from "./lib/dataset-traces.mjs";
 import { windowClause } from "./lib/case-window.mjs";
+import { priorJudgments } from "./lib/judge-package.mjs";
+import { openFindings } from "./lib/judge-quality.mjs";
 
 const argOf = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
 const has = (n) => process.argv.includes(n);
@@ -35,7 +38,7 @@ const DATASET = argOf("--dataset", "");
 const KIND = argOf("--kind", "both");
 const JSON_OUT = has("--json");
 if (!DATASET) fail("--dataset 必填");
-if (!["run", "judge", "both"].includes(KIND)) fail(`--kind 只能是 run|judge|both，收到 ${KIND}`);
+if (!["run", "judge", "fix", "both"].includes(KIND)) fail(`--kind 只能是 run|judge|fix|both，收到 ${KIND}`);
 requireCredential();
 
 // 用例集 → 题 → 历次诊断，解析线单源在 lib/dataset-traces.mjs（导语料按集合筛也用它）
@@ -50,7 +53,7 @@ const { project, dataset, records, runsByRecord } = resolved;
 // 判过没有：判题结果由 server 投影到 root span 的 `evaluation.*` tag（P2/ADR-0051），
 // 所以问 spans 就够，不用回头翻 annotation 原件。
 const judged = new Set();
-if (KIND !== "run") {
+if (KIND === "judge" || KIND === "both") {
   const traceIds = [...runsByRecord.values()].flat().map((r) => r.traceId).filter(Boolean);
   if (traceIds.length > 0) {
     const res = await call("POST", "/api/v2/llmobs/spans/search", {
@@ -94,12 +97,44 @@ for (const rec of records) {
   }
 }
 
+// ── 还没修的（`--kind fix`，飞轮 §14）──────────────────────────────────────────
+//
+// 判据三条，缺一不可：这道题**判过**、还有**没关的问题**（关单规则单源在 lib/judge-quality.mjs）、
+// 且这些问题里**至少一条没人接**（没打过 `claimed_fixed`；`wont_fix` 已被 openFindings 挡在外面）。
+// 第三条是为了让清单跟着人走：全都打了「改了等复验」的那道题，等的是下一次复现，不是等人修——
+// 留在待修里，修的人每轮都要重新筛一遍，清单越长越没人看。
+const needFix = [];
+if (KIND === "fix" || KIND === "both") {
+  const traceIds = [...runsByRecord.values()].flat().map((r) => r.traceId).filter(Boolean);
+  // 批注一次问全（findAllAnnotationsByContent 自己分块翻页），别一道题一个请求
+  const interactions = traceIds.length ? await findAllAnnotationsByContent(traceIds) : new Map();
+  for (const rec of records) {
+    const runs = (runsByRecord.get(rec.id) ?? []).filter((r) => r.traceId);
+    if (!runs.length) continue;
+    const rounds = priorJudgments(
+      runs.map((r) => ({ experiment: { id: r.experimentId, name: r.experimentName, created_at: r.experimentCreatedAt }, traceId: r.traceId })),
+      interactions,
+    ).filter((r) => r.judged !== false);
+    if (!rounds.length) continue;
+    const open = openFindings(rounds);
+    if (!open.length || !open.some((f) => f.fix_mark !== "claimed_fixed")) continue;
+    needFix.push({
+      recordId: rec.id,
+      prompt: rec.input?.prompt ?? "",
+      // 最新判过那一轮的 trace：修复标记要打在**挖出这条问题的 trace** 上，而 fix-run 领的是最新那一轮
+      traceId: rounds[rounds.length - 1].trace_id,
+      openKeys: open.map((f) => f.key),
+    });
+  }
+}
+
 if (JSON_OUT) {
   const out = {
     project: PROJECT, dataset: DATASET, dataset_version: dataset.current_version ?? null,
     total_records: records.length,
-    ...(KIND !== "judge" ? { need_run: needRun, waiting_repro: waitingRepro } : {}),
-    ...(KIND !== "run" ? { need_judge: needJudge } : {}),
+    ...(KIND === "run" || KIND === "both" ? { need_run: needRun, waiting_repro: waitingRepro } : {}),
+    ...(KIND === "judge" || KIND === "both" ? { need_judge: needJudge } : {}),
+    ...(KIND === "fix" || KIND === "both" ? { need_fix: needFix } : {}),
   };
   // 写完**不要** process.exit：往管道写是异步的，exit 不等它刷完，后半截直接丢
   // （2026-09-10 实测：105KB 被截到 41KB，报出来长得像上游数据坏了）。
@@ -109,7 +144,7 @@ if (JSON_OUT) {
 
 const one = (s, n = 56) => String(s).replace(/\s+/g, " ").trim().slice(0, n);
 console.log(`用例集 ${DATASET}（${records.length} 条用例）`);
-if (KIND !== "judge") {
+if (KIND === "run" || KIND === "both") {
   console.log(`\n复现过、还没诊断：${needRun.length} 条` + (needRun.length ? "" : "（没有）"));
   for (const r of needRun) console.log(`  ${r.recordId}  ${one(r.prompt)}`);
   if (waitingRepro.length) {
@@ -126,12 +161,20 @@ if (KIND !== "judge") {
     console.log(`     node scripts/llmobs/run-experiment.mjs --experiment <本轮名字> --scenarios <上面的 record id>`);
   }
 }
-if (KIND !== "run") {
+if (KIND === "judge" || KIND === "both") {
   console.log(`\n跑过但没判：${needJudge.length} 条` + (needJudge.length ? "" : "（都判过了）"));
   for (const r of needJudge) console.log(`  ${r.traceId}  ${one(r.prompt)}`);
   if (needJudge.length) {
     console.log(`\n  ↳ 判它们：把每条 trace 交给 agent 按 dbdog/diag-judge（插件 dbdog-agent-obs） 判，`);
     console.log(`     判完用 judge-package-import.mjs 回流（或让 agent 直接写回）。`);
+  }
+}
+if (KIND === "fix" || KIND === "both") {
+  console.log(`\n判过、还有没关的问题：${needFix.length} 条` + (needFix.length ? "" : "（都修完了或都等着复现）"));
+  for (const r of needFix) console.log(`  ${r.recordId}  ${one(r.prompt, 40)}  ${r.openKeys.length} 条：${r.openKeys.slice(0, 3).join(" · ")}${r.openKeys.length > 3 ? " …" : ""}`);
+  if (needFix.length) {
+    console.log(`\n  ↳ 修它们（一次一道题，在交互会话里跑 fix-run）：`);
+    console.log(`     node scripts/llmobs/fix-context.mjs --record <上面的 record id> --dataset ${DATASET}`);
   }
 }
 }

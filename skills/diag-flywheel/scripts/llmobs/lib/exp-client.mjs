@@ -144,6 +144,12 @@ export async function findDataset(projectID, name) {
   return flatten(page?.data?.[0]);
 }
 
+/** 列 project 下全部 dataset（手里只有 record id、要反查它属于哪个集合时用；按名字找走 findDataset）。 */
+export async function listDatasets(projectID) {
+  const page = await call("GET", `${CP}/${projectID}/datasets`);
+  return (page?.data ?? []).map(flatten);
+}
+
 /** 建 dataset。同为 get-or-create；project 不存在回 404（我方 FK，ADR-0049 §6.3 登记的有意偏离）。 */
 export async function createDataset(projectID, name, description, metadata) {
   const out = await call("POST", `${CP}/${projectID}/datasets`,

@@ -67,8 +67,9 @@ if (!jsonl) {
   const { rows, problems } = parseAnnotationsJsonl(jsonl);
   for (const p of problems) console.error(`⚠ ${p}`);
   if (!rows.length) fail("annotations.jsonl 里没有一行可用记录");
-  // 形状不合契约就整包不写：写进去的旧形状（一段 fix_where 塞五处改动、或 2026-09-11 之前的词表）数不出哪处修了，
-  // 而写了一半的包比一行没写更难收拾（飞轮设计 §13.3）。
+  // 形状不合契约就整包不写：写进去的旧形状（一段 fix_where 塞五处改动、或 2026-09-13 之前那套六类 × qualifier）
+  // 数不出哪处修了，而写了一半的包比一行没写更难收拾（飞轮设计 §13.3）。
+  // 旧字段出现即拒，不是收下忽略：判官写了旧字段，说明它读的是旧口径，这一例的分类整体不可信。
   const invalid = rows.filter((r) => r.invalid?.length);
   if (invalid.length) {
     fail(`判题产物有 ${invalid.length} 行不合契约（上面的 ⚠ 逐条列了）——改完重跑 import，这一次一行都没写`);
@@ -139,7 +140,7 @@ if (!jsonl) {
     const saved = await upsertAnnotations(payload);
     wrote += saved.length;
     console.error(`✓ 批注 ${saved.length} 条（${rows.length} 例，annotator=${annotator || "（空）"}）`);
-    console.error("  finding_kinds 已从 findings 算出一起写；分数不用另写：server 收到 annotation 后自动投影成 experiment metric 与 root span 的 evaluation.* tag");
+    console.error("  finding_kinds（true_bug / needs_decision）已从 findings 算出一起写；分数不用另写：server 收到 annotation 后自动投影成 experiment metric 与 root span 的 evaluation.* tag");
     if (manifest.rubric?.id) console.error(`  rubric_version 一起写：${manifest.rubric.id}`);
   }
 }

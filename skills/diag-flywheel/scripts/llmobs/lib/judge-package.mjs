@@ -1,8 +1,9 @@
 // judge-package.mjs — 判题包的**纯函数**层（形状、渲染、解析），零 I/O、零 fetch。
 //
 // 单源关系（军规 3）：
-//   · label 词表与取值形状 = dbdog-web `docs/design/llmobs-diag-flywheel.md` §7.1（2026-09-11 改版：结论 / 证据 / 改进点）；
-//     export 写进 manifest、import 按 manifest 的 id 回写、判题 skill 正文按同一张表判——三处共用本文件。
+//   · label 词表与取值形状 = dbdog-web `docs/design/llmobs-diag-flywheel.md` §7.1（问题只分两类）、
+//     条目与闭环 §13.3、修复 loop §14；export 写进 manifest、import 按 manifest 的 id 回写、
+//     判题 skill 正文（labs `skills/diag-judge/SKILL.md`）按同一张表判——三处共用本文件。
 //   · 探针 outcome 四值与同事 skill `evidence-chain` 同口径（`../dbdog-labs/skills/evidence-chain/scripts/check_chain.py` 是它的守门）。
 //   · 假设树**只认 span tags**（`hypothesis_id` / `parent_hypothesis_id` / `hypothesis` / `expect` /
 //     `resolve`），不在这里再写一份 intent 解析器——那份在 dbdog-labs 的 `claude-code-hooks/hypothesis.mjs`
@@ -38,8 +39,8 @@ export const VERDICTS = ["correct", "partial", "wrong", "unknown", "not_reproduc
 export const LABEL_SCHEMA = [
   { label: "verdict", value_type: "categorical", options: VERDICTS, display: "结论对不对：对 / 部分对 / 错 / 判不了（没答案纸） / 这次现场不成立" },
   { label: "evidence", value_type: "categorical", options: ["solid", "weak"], display: "证据撑不撑得住结论" },
-  { label: "findings", value_type: "json", display: "改进点（一条一个）+ 对之前几轮条目的复验" },
-  { label: "finding_kinds", value_type: "json", display: "改进点类别（由 import 从 findings 算出，筛选用）" },
+  { label: "findings", value_type: "json", display: "问题（一条一个：确定是 bug / 要人定）+ 对之前几轮条目的复验" },
+  { label: "finding_kinds", value_type: "json", display: "这一次有哪两类问题（由 import 从 findings 算出，筛选用）" },
   { label: "summary", value_type: "string", display: "总评（大白话，≤ 600 字符）" },
   { label: "fix_marks", value_type: "json", display: "修复标记（改了等复验 / 要人协助 / 不修；fix-mark.mjs 写）" },
   { label: "rubric_version", value_type: "string", display: "判的是哪一版判卷口径（由 import 从包里记的那份写）" },
@@ -51,64 +52,35 @@ export const JUDGE_WRITTEN_LABELS = ["verdict", "evidence", "findings", "summary
 export const EVIDENCE_VALUES = ["solid", "weak"];
 
 /**
- * 改进点六类（§7.1）：分类的唯一标准是「下一步谁去干什么、怎么验」，互斥。顺序就是 finding_kinds 的输出顺序。
- * tool 确定性（代码 / 配置，含 hooks 与跑批脚本；重放必现，改代码，复验一次即关）；skill 非确定性（给模型的话：
- * skill 正文 / 工作目录模板 / 派单提示词；改一段话，连续两轮 fixed 才关）；model 不改代码只计次；case 改用例；
- * env 回复现那一侧；unsure 要人看。
- * 2026-09-11 晚撤掉 scaffold（编排错）：按话题分、不按下一步分，一条提出来分不清改代码还是改话；原归它的拆进 tool / skill。
- * 2026-09-11 晚补 env：这次复现的窗口里现象根本没出来（靶机被重装、时间窗错位），既不是题错也不是 dbdog 的错，
- * 下一步是回复现那一侧重跑——原先无处可放，只能塞 case 或 unsure，两种都失真。
+ * 问题两类（§7.1 / D4，2026-09-13 三改）。**分类只问一句：判官自己核实了它是确定性的错吗？**
+ * 顺序就是 `finding_kinds` 的输出顺序。
+ *
+ * · `true_bug`       —— 原样重放同样错，**并且**从另一条路（直查库表 / 别的工具 / DDSQL / 控制台 /
+ *                       对照实例）证明数据本该有；或报错可原样重现。含 hooks、跑批脚本这类代码错。
+ *                       交 `how_verified` / `repro` / `expected`，下游按判定链自动修。
+ * · `needs_decision` —— 核实不了对错，只能把观察摆出来让人定。交 `decision` / `ask` / `context`。
+ *
+ * 为什么不再分得更细：判官替下游做的分类下游不消费（owner 2026-09-13：「你真的判断出了是工具真的
+ * bug，你也不用告诉我继续去怎么分类的更细，给你下游给到必要的信息更为关键」）。
+ * 类名不叫 `needs_human`——修复标记 `fix_marks[].status` 里已经有一个 `needs_human`（修的人说要人协助），
+ * 两件事不能同名。
  */
-export const FINDING_KINDS = ["tool", "skill", "model", "case", "env", "unsure"];
+export const FINDING_CLASSES = ["true_bug", "needs_decision"];
 
 /**
- * 这几类是**有人能动手**的：`tool` / `skill` 修 dbdog，`case` 回出题那一侧人工改题面或答案纸。
+ * 要人定的是**哪一种决定**（§7.1）。分的不是「谁的锅」，是「人要拍的是什么板」：
  *
- * `env` 2026-09-12 退出这一档（owner：「改题面可以判为需要人工介入，但是环境是改不了的」）。
- * 现场不成立没有下一步——既不是 dbdog 的错也不是题的错，只能重新复现。把改不了的东西留在
- * 「能动手修的」里，修的人每轮都要先筛一遍，而清单越长越没人看（Tricorder：误报率过约 10%
- * 开发者就不再看它报的任何东西）。
+ * · `wording`    说法会误导：给模型的话（skill 正文 / 工作目录模板 / 派单提示词）。判官不说对错，
+ *                只说明它把模型引向哪个方向、产生什么误解；「该写的没写」也算。非确定性 ⇒ 关单要连续两轮。
+ * · `capability` 缺能力：dbdog 没这个工具 / 采集项 / 字段，补上影响面大，所以要人拍板。
+ * · `case`       题目有问题：答案纸与证据矛盾、题面缺时间窗或必要信息、没有答案纸。
+ * · `is_bug`     看不出是不是 bug：直查、换路、控制台三条路都走了，仍分不开「丢了」和「本来就没有」。
+ *                这一档就是**弃判**，聚合时单独计（Autorubric 的 CANNOT_ASSESS 同理：与判值并列，不混进产量）。
  */
-export const FIXABLE_KINDS = ["tool", "skill", "case"];
+export const DECISIONS = ["wording", "capability", "case", "is_bug"];
 
-/**
- * `TOOL_LAYERS` 与 `fix_where` 2026-09-12 撤销（owner：「判题层把问题找到就可以了，
- * 在哪个仓库修复应该是修复层做的事情」「layer / fix_where 就不要写，我们不确定，
- * 给出去的东西不确定」）。
- *
- * 撤销的硬理由不是分工，是**判题包里没有这个材料**：判官手上是 trace / 答案纸 / 历史判定 /
- * 还没关的条目，外加 MCP。这几样都答不了「这个工具返回空是服务端查询写错了还是采集就没采」
- * ——在线去活系统核能分开「有这项但返回错」与「根本没这项」（那是 qualifier 这一维），
- * 但分不开 server 和 agent，那要知道 dbdog 的实现。逼填就是逼猜。
- *
- * 猜错的代价是隐形的：修的人照着落点打开一个文件，发现不是那儿，重新定位一遍——而工单上
- * 那行错落点会一直留着，下一轮同 `key` 又按它聚合。
- *
- * **老包里带着这两个字段不拒**，忽略即可：拒一条无害的多余字段，代价是一例几十分钟白跑，
- * 收益只是整洁。
- */
-
-/**
- * ODC（Orthogonal Defect Classification，IBM Chillarege）的 qualifier：**缺失 / 写错 / 多余**是与
- * 缺陷类别**正交的另一维**，不该塞进类别里。对我们的两处直接受益：
- *   · tool：「dbdog 根本没这个工具 / 没采这项」(missing) 与「有但返回错」(incorrect) 下一步不同——
- *     前者是排能力、后者是修 bug，验法也不同；
- *   · skill：「那条规矩没写」(missing) 与「写了但写错」(incorrect)——原先 rubric 把分界压成
- *     「规矩写没写」一句话，写错的那种会被推给 model（不改代码、只计次）从而沉底。
- */
-export const FINDING_QUALIFIERS = ["missing", "incorrect", "extraneous"];
-
-/** 必须给 qualifier 的两类（model 是模型行为、case/env/unsure 没有「实现」可言）。 */
-export const QUALIFIED_KINDS = ["tool", "skill"];
-
-/**
- * 判官**核到什么程度**（2026-09-12 加）。它是工单的可信度刻度：同一条 `tool` 类缺陷，
- * 在线试过 / 只看了轨迹 / 想核但核不了，下游拿到手的确信程度差一个量级，而此前工单上看不出来。
- *   · `online`      —— 自己调 dbdog 核过（判据最硬，`repro` 多半就是他刚跑通的那条）
- *   · `trace_only`  —— 只看了轨迹，没去活系统
- *   · `unreachable` —— 想核但核不了（现场已过期 / MCP 不通）
- */
-export const VERIFIED_LEVELS = ["online", "trace_only", "unreachable"];
+/** 判官写不了的旧字段：出现即整包拒（读侧另有 `normalizeFindings` 的宽容映射）。 */
+export const RETIRED_ITEM_FIELDS = ["kind", "qualifier", "verified", "rule_ref", "suspected_kind", "suggestion", "layer", "fix_where"];
 
 /** 修复标记三值（§13.3）：改了等复验 / 要人协助 / 不修。 */
 export const FIX_MARK_STATUSES = ["claimed_fixed", "needs_human", "wont_fix"];
@@ -323,7 +295,7 @@ export function renderForward(spans, { eventId = "", traceId = "" } = {}) {
 
   lines.push("## 工具调用（按时间）");
   lines.push("");
-  // span 列不是装饰：每条改进点的 pointers 要指到 span_id，回流会拿它跟 trace.json 对。
+  // span 列不是装饰：每条问题的 pointers 要指到 span_id，回流会拿它跟 trace.json 对。
   // 而判官被告知「trace.json 几 MB 不要通读，看 forward.md」——摘要里不打 span_id，
   // 就等于逼他去翻几 MB 原文，或者编一个（编的会被整包拒）。
   lines.push("| # | span | 工具 | 假设 | 状态 | 意图 |");
@@ -467,21 +439,22 @@ export function parseAnnotationsJsonl(text) {
   return { rows, problems };
 }
 
-/* ── 改进点与复验（飞轮设计 §13.3：「每次改哪里拆成一条一条」「修没修好看实际效果，不依赖人的反馈」） ── */
+/* ── 问题条目与复验（飞轮设计 §13.3：「每次改哪里拆成一条一条」「修没修好看实际效果，不依赖人的反馈」） ── */
 
 /** 复验结果：修好了 / 又撞上了 / 这一轮没走到那条路（不算数）。 */
 export const FIX_CHECK_STATUSES = ["fixed", "still_open", "not_exercised"];
 
 /**
- * 条目 key：小写 ascii，`<层>.<模块>.<缺什么>`。它是跨轮次认「同一个缺口」的唯一依据——
+ * 条目 key：小写 ascii，形如 `<工具或现象>.<缺什么>`。它是跨轮次认「同一个问题」的唯一依据——
  * 换个说法再提一遍就数不清修没修，所以要短、要稳、要能 grep。
+ * **按症状取名，不按落点**（不写 `server.` / `agent.` 前缀）：落点是猜的，key 一旦定了改不动。
  */
 export const FIX_KEY_RE = /^[a-z0-9][a-z0-9._-]{2,79}$/;
 
 function pointerProblems(where, pointers, required) {
   const out = [];
   const list = Array.isArray(pointers) ? pointers : [];
-  if (required && list.length === 0) out.push(`${where}.pointers 为空（每条改进点都得指到 span_id 或探针行）`);
+  if (required && list.length === 0) out.push(`${where}.pointers 为空（每条都得指到 span_id 或在线取证行）`);
   for (const pt of list) {
     if (!pt || typeof pt !== "object" || (!pt.span_id && !pt.probe)) {
       out.push(`${where}.pointers 里的 ${JSON.stringify(pt)} 既不是 {span_id} 也不是 {probe}`);
@@ -493,22 +466,23 @@ function pointerProblems(where, pointers, required) {
 const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
 
 /**
- * `findings` 的形状：
- * `{ items: [{key, kind, qualifier?, title, evidence, expected, repro, pointers}], checks: [{key, status, kind?, pointers, note}] }`。
- * - items：这一轮新发现的改进点，一条一个缺口。判官只交**自己观察得到的**：
- *   `kind` 这是哪一类错（六类，判据是「固定代码重放会不会一样错」）、`qualifier` 缺失 / 写错 / 多余
- *   （tool、skill 必填）。`title` / `evidence` 必填（读的人靠它们，不靠 key）；
- *   `expected`（修好之后重放该看到什么）在 tool / skill / case 三类与 unsure 必填；
- *   **`repro` 六类全必填**（owner 2026-09-12）；`rule_ref` 在 model 必填；`suspected_kind` 在 unsure 必填。
- *   `layer` / `fix_where` 已撤（见 FIXABLE_KINDS 上方那段）：代码位置归修复层。
- * - checks：这道题之前几轮提过、还没关的，逐条复验（`fixed` / `still_open` 必须带证据指针）。
- * 旧形状（`attribution`、顶层一段 `fix_where`）直接拒：一段里塞五处改动，数不出哪处修了。
+ * `findings` 的形状（§13.3）：
+ * `{ roots, items: [{key, class, title, pointers, …按类必填}], checks: [{key, status, class?, pointers, note}] }`。
+ *
+ * - items：这一轮新发现的问题，一条一个。两类都要 `key` / `class` / `title` / `pointers`；
+ *   `true_bug` 另要 `how_verified`（怎么核出来的判定链）/ `repro`（一条能跑的调用）/ `expected`（修好后重放该看到什么）；
+ *   `needs_decision` 另要 `decision`（定的是哪一种）/ `ask`（一句「请定：…」）/ `context`（全部上下文）。
+ * - checks：这道题之前几轮提过、还没关的，逐条复验（`fixed` / `still_open` 必须指到证据，`still_open` 还要带 `class`）。
+ *
+ * **写侧严格**：`RETIRED_ITEM_FIELDS` 里的旧字段出现即整包拒——判官写了旧字段，说明它读的是旧口径，
+ * 那这一例的分类多半整体不可信，收下忽略比拒还坏（此前 `layer` / `fix_where` 就是收下忽略的，
+ * 于是没人知道那一例是按哪一版口径判的）。读侧的宽容在 `normalizeFindings`，只住那一处。
  */
 export function validateFindings(a) {
   const problems = [];
   if (!a || typeof a !== "object" || Array.isArray(a)) return ["findings 必须是对象"];
   if ("fix_where" in a && !("items" in a)) {
-    return ["findings 是旧形状（顶层一段 fix_where）——改成 items[] 一条一个落点、checks[] 复验之前几轮提过的（skill「改进点」一节）"];
+    return ["findings 是旧形状（顶层一段 fix_where）——改成 items[] 一条一个问题、checks[] 复验之前几轮提过的（判卷口径「有哪些问题」一节）"];
   }
   const items = a.items ?? [];
   const checks = a.checks ?? [];
@@ -518,70 +492,41 @@ export function validateFindings(a) {
   (Array.isArray(items) ? items : []).forEach((it, i) => {
     const w = `findings.items[${i}]`;
     if (!it || typeof it !== "object") return problems.push(`${w} 必须是对象`);
-    if (!FIX_KEY_RE.test(String(it.key ?? ""))) problems.push(`${w}.key ${JSON.stringify(it.key)} 不合规（小写 ascii，<层>.<模块>.<缺什么>）`);
-    else if (keys.has(it.key)) problems.push(`${w}.key ${it.key} 重复——一个缺口只提一条`);
+    if (!FIX_KEY_RE.test(String(it.key ?? ""))) problems.push(`${w}.key ${JSON.stringify(it.key)} 不合规（小写 ascii，形如 <工具或现象>.<缺什么>，按症状取名不按落点）`);
+    else if (keys.has(it.key)) problems.push(`${w}.key ${it.key} 重复——一个问题只提一条`);
     else keys.add(it.key);
-    if (!FINDING_KINDS.includes(it.kind)) problems.push(`${w}.kind ${JSON.stringify(it.kind)} 只能是 ${FINDING_KINDS.join(" / ")}`);
-    if (!nonEmpty(it.title)) problems.push(`${w}.title 缺失（一句话说谁在哪出了什么事）`);
-    if (!nonEmpty(it.evidence)) problems.push(`${w}.evidence 缺失（看到了什么 / 本该是什么 / 为什么是问题）`);
-    // `expected` 取代 `suggestion`（2026-09-12）：写的是**修好之后重放该看到什么**，不是「去哪儿改」。
-    // 怎么改归修复层；判官这一栏同时是关单判据——`fix-mark` 打了 claimed_fixed 之后，
-    // 复验对照的就是它。
-    if (nonEmpty(it.suggestion)) {
-      problems.push(`${w}.suggestion 已废弃，改写 expected：不是「去哪儿改」（那归修复层），是「修好之后重放该看到什么」`);
+    if (!FINDING_CLASSES.includes(it.class)) {
+      problems.push(`${w}.class ${JSON.stringify(it.class)} 只能是 ${FINDING_CLASSES.join(" / ")}` +
+        "（判据只有一句：你自己核实了它是确定性的错吗）");
     }
-    if (FIXABLE_KINDS.includes(it.kind) && !nonEmpty(it.expected)) {
-      problems.push(`${w}.expected 缺失（${it.kind} 类必填：修好之后重放该看到什么）`);
+    if (!nonEmpty(it.title)) problems.push(`${w}.title 缺失（一句话，≤ 40 字，说谁在哪出了什么事）`);
+    // 旧口径的字段出现即拒，一个一个点名：报「未知字段」判官改不动，它得知道这一栏搬去了哪。
+    for (const f of RETIRED_ITEM_FIELDS) {
+      if (it[f] === undefined) continue;
+      problems.push(`${w}.${f} 是 2026-09-13 之前的旧字段，已经没有了：` +
+        "问题只分两类（true_bug / needs_decision），确定是 bug 的写 how_verified / repro / expected，" +
+        "要人定的写 decision / ask / context；判题不说怎么修、不说改哪里");
     }
-    if (it.kind === "unsure" && !nonEmpty(it.expected)) problems.push(`${w}.expected 缺失（unsure 写「请核：…（看哪里）」）`);
-    // ODC 的第二维：缺失 / 写错 / 多余。不问这一句，「没这个能力」与「有但坏了」会挤在同一类里，
-    // 而它们的下一步和验法都不同（见 FINDING_QUALIFIERS）。
-    if (QUALIFIED_KINDS.includes(it.kind) && !FINDING_QUALIFIERS.includes(it.qualifier)) {
-      problems.push(`${w}.qualifier ${JSON.stringify(it.qualifier)} 只能是 ${FINDING_QUALIFIERS.join(" / ")}（缺失 / 写错 / 多余）`);
+    if (it.class === "true_bug") {
+      // 判定链、重放、修好后该看到什么——三样是**下游不必再核一遍**的最小集合。
+      // 缺 how_verified 就退化成「我觉得它错了」；缺 repro 这一条永远关不掉（关单判据就是重放变对）。
+      if (!nonEmpty(it.how_verified)) {
+        problems.push(`${w}.how_verified 缺失（确定是 bug 必填：看到什么 / 原样重放得到什么 / 从别的路拿到什么 / 所以 dbdog 在哪一步给错了）`);
+      }
+      if (!nonEmpty(it.repro)) problems.push(`${w}.repro 缺失（确定是 bug 必填：一条能跑的调用，工具名 + 入参 + 期望 vs 实际——关它的判据就是重放变对）`);
+      if (!nonEmpty(it.expected)) problems.push(`${w}.expected 缺失（确定是 bug 必填：修好之后重放该看到什么，不是「去哪儿改」）`);
     }
-    if (!QUALIFIED_KINDS.includes(it.kind) && it.qualifier !== undefined && !FINDING_QUALIFIERS.includes(it.qualifier)) {
-      problems.push(`${w}.qualifier ${JSON.stringify(it.qualifier)} 只能是 ${FINDING_QUALIFIERS.join(" / ")}`);
-    }
-    // **六类全要写「怎么复现」**（owner 2026-09-12：「所有类别都是各自使用一段话说清楚」）。
-    //
-    // 原来只有 tool 必填，理由是「关它的判据是重放必须变对」。那条对 tool 仍然成立，但它把
-    // 另外五类漏在了外面——而下游拿到一条改进点要做的第一件事，永远是先把它再现一遍。
-    // Bettenburg 等对 466 名开发者的调查：复现步骤是开发者最想要的字段，也是最常缺的那个；
-    // 那份调查问的不是「工具类缺陷」，是所有缺陷。
-    //
-    // **一段话，不是一条命令**（同日 owner 定）。tool 类天然能写成一条命令，写进那段话里最好；
-    // 另外五类本来就没有命令可跑——skill 缺一句话、模型推错一步、题面缺时间窗，这些的「复现」
-    // 是「照着走一遍会看到什么」，逼它们凑一条命令只会凑出一条跑不通的假命令。
-    if (!nonEmpty(it.repro)) {
-      problems.push(`${w}.repro 缺失（六类全必填，一段话说清怎么再现：在哪、做什么、期望什么、实际什么。` +
-        `tool 类能写成一条命令的就写进去——关它的判据是重放变对）`);
-    }
-    // model 是「前两问都答否」的剩余类，也是归因最不可靠的一类（Who&When Pro：错误类别 macro-F1 ≤ 22.2%、
-    // 定位决定性步 ≈ 14%）。所以它得给反证：规矩写在哪一节（证明不是 skill 的锅）+ 指到没照做的那一步。
-    // `tool` 的判据本来就是「去活系统核，固定代码重放会不会一样错」——没核过就不该往 tool 上判，
-    // 所以这一类必填。别的类别不逼填（skill 缺一句话、模型推错一步，本来就不靠调 dbdog 核）。
-    if (it.kind === "tool" && !VERIFIED_LEVELS.includes(it.verified)) {
-      problems.push(`${w}.verified ${it.verified === undefined ? "缺失" : JSON.stringify(it.verified)}（tool 类必填，只能是 ${VERIFIED_LEVELS.join(" / ")}）`);
-    }
-    if (it.kind !== "tool" && it.verified !== undefined && !VERIFIED_LEVELS.includes(it.verified)) {
-      problems.push(`${w}.verified ${JSON.stringify(it.verified)} 只能是 ${VERIFIED_LEVELS.join(" / ")}`);
-    }
-    if (it.kind === "model" && !nonEmpty(it.rule_ref)) {
-      problems.push(`${w}.rule_ref 缺失（model 类必填：规矩写在哪个 skill / 模板的哪一节——查不到就说明这是 skill 缺规矩，不是模型抽风）`);
-    }
-    // 弃判不是一种缺陷类别，它是「还没定」。记下疑似类别，这一条才留得在对应的漏斗里
-    // （Autorubric 的 CANNOT_ASSESS 同理：它与判值并列，但聚合时单独处理）。
-    if (it.kind === "unsure") {
-      const suspects = FINDING_KINDS.filter((k) => k !== "unsure");
-      if (!suspects.includes(it.suspected_kind)) {
-        problems.push(`${w}.suspected_kind ${JSON.stringify(it.suspected_kind)} 只能是 ${suspects.join(" / ")}（弃判也要说清疑似谁的锅）`);
+    if (it.class === "needs_decision") {
+      if (!DECISIONS.includes(it.decision)) {
+        problems.push(`${w}.decision ${JSON.stringify(it.decision)} 只能是 ${DECISIONS.join(" / ")}` +
+          "（说法会误导 / 缺能力 / 题目有问题 / 看不出是不是 bug）");
+      }
+      if (!nonEmpty(it.ask)) problems.push(`${w}.ask 缺失（要人定必填：一句「请定：…」或「请核：…」）`);
+      // 上下文要让人不用回头翻 trace：缺了它，人只能自己去查一遍，那这条分诊就白做了。
+      if (!nonEmpty(it.context)) {
+        problems.push(`${w}.context 缺失（要人定必填：原句 / 原调用逐字、模型在本例里怎么读的、走到哪、本该到哪；禁行话与自造词，带本例例子）`);
       }
     }
-    // skill 类的下一步是「改一段话」：不写出原句，改的人还得自己再想一遍——那就不算能走下去的条目
-    if (it.kind === "skill" && nonEmpty(it.expected) && !/[「“"]/.test(it.expected)) {
-      problems.push(`${w}.expected 没写出要加或要改的原句（skill 类要用「」把那句话引出来）`);
-    }
-    if (it.kind === "scaffold") problems.push(`${w}.kind scaffold 已撤（2026-09-11）：hooks / 跑批脚本的代码错归 tool，模板 / 提示词的话归 skill`);
     problems.push(...pointerProblems(w, it.pointers, true));
   });
   (Array.isArray(checks) ? checks : []).forEach((c, i) => {
@@ -589,19 +534,20 @@ export function validateFindings(a) {
     if (!c || typeof c !== "object") return problems.push(`${w} 必须是对象`);
     if (!FIX_KEY_RE.test(String(c.key ?? ""))) problems.push(`${w}.key ${JSON.stringify(c.key)} 不合规`);
     if (!FIX_CHECK_STATUSES.includes(c.status)) problems.push(`${w}.status 只能是 ${FIX_CHECK_STATUSES.join(" / ")}`);
-    // `still_open` 的 kind 必填：`finding_kinds` 只把**带 kind** 的 still_open 算进去，
-    // 缺了这条缺口就不进页面的类别筛选——「又撞上了」却在类别里查无此人。
-    if (c.status === "still_open" && !FINDING_KINDS.includes(c.kind)) {
-      problems.push(`${w}.kind 缺失或不在词表里（${FINDING_KINDS.join(" / ")}）：又撞上的那条要带类别，否则页面上这个缺口不显形`);
-    } else if (c.kind !== undefined && !FINDING_KINDS.includes(c.kind)) {
-      problems.push(`${w}.kind ${JSON.stringify(c.kind)} 不在词表里（${FINDING_KINDS.join(" / ")}）`);
+    // `still_open` 的 class 必填：`finding_kinds` 只把**带 class** 的 still_open 算进去，
+    // 缺了这条问题就不进页面的类别筛选——「又撞上了」却在类别里查无此人。
+    if (c.status === "still_open" && !FINDING_CLASSES.includes(c.class)) {
+      problems.push(`${w}.class 缺失或不在词表里（${FINDING_CLASSES.join(" / ")}）：又撞上的那条要带类别（照原条目），否则页面上这个问题不显形`);
+    } else if (c.class !== undefined && !FINDING_CLASSES.includes(c.class)) {
+      problems.push(`${w}.class ${JSON.stringify(c.class)} 不在词表里（${FINDING_CLASSES.join(" / ")}）`);
     }
+    if (c.kind !== undefined) problems.push(`${w}.kind 是旧字段：复验带的是 class（${FINDING_CLASSES.join(" / ")}），照原条目写`);
     problems.push(...pointerProblems(w, c.pointers, c.status === "fixed" || c.status === "still_open"));
     if (keys.has(c.key)) problems.push(`${w}.key ${c.key} 同时出现在 items 里——又撞上的只写 still_open 复验，不要再提一条`);
   });
   // `roots.extra`：agent 报了答案纸上**没有**的根因（2026-09-12 加）。
-  // 可能是它对（答案纸不全 → 该记一条 `case`），也可能是它编的（→ `model`）；两种都值钱，
-  // 而此前 roots 只有 matched / missed 两格，这一类观察连落脚处都没有，两种都丢了。
+  // 可能是它对（答案纸不全 → 该记一条要人定·题目有问题），也可能是它编的（→ 归 evidence 与 roots 记下）；
+  // 两种都值钱，而此前 roots 只有 matched / missed 两格，这一类观察连落脚处都没有。
   // **不参与 verdict 推导**：verdict 只按答案纸上那几条算，多说的另算，否则口径一改就没法重算历史。
   const extra = a.roots?.extra;
   if (extra !== undefined) {
@@ -613,23 +559,22 @@ export function validateFindings(a) {
 }
 
 /**
- * 这一条批注里的**弃判**：几条、各疑似谁的锅。
+ * 这一条批注里的**弃判** = `decision: is_bug` 的条目：三条取证路都走了，仍分不开「丢了」和「本来就没有」。
  *
- * 单独算是因为弃判与缺陷不是一回事（Autorubric 的 `CANNOT_ASSESS`、以及 rubric 判题一致性
- * 测量的惯例：弃判率要与一致率分开报）。混在 `finding_kinds` 里看，会让「这轮挖到几条 tool」
+ * 单独算是因为弃判与「挖到一个问题」不是一回事（Autorubric 的 `CANNOT_ASSESS`、以及 rubric 判题
+ * 一致性测量的惯例：弃判率要与一致率分开报）。混在产量里看，会让「这轮挖到几条确定的 bug」
  * 和「这轮有几条没敢定」长得一样；而这两件事要采取的动作完全相反——前者去修，后者去核。
  */
 export function deriveAbstention(findings) {
   const { items } = normalizeFindings(findings);
-  const suspected = [];
+  const keys = [];
   let count = 0;
   for (const it of items) {
-    if (it?.kind !== "unsure") continue;
+    if (it?.class !== "needs_decision" || it?.decision !== "is_bug") continue;
     count += 1;
-    const s = it?.suspected_kind;
-    if (FINDING_KINDS.includes(s) && s !== "unsure" && !suspected.includes(s)) suspected.push(s);
+    if (it?.key && !keys.includes(it.key)) keys.push(String(it.key));
   }
-  return { count, suspected };
+  return { count, keys };
 }
 
 /**
@@ -736,20 +681,62 @@ export function validateAgainstCase(labels, ctx = {}) {
 }
 
 /**
- * `finding_kinds` = items 的 kind ∪ still_open 复验的 kind，去重、按词表顺序。
+ * `finding_kinds` = items 的 class ∪ still_open 复验的 class，去重、按词表顺序（`true_bug` 在前）。
  * **算出来的，判题方不写**——写了也被这个覆盖（军规 3：能推导的值不许再钉一份）。
  */
 export function deriveFindingKinds(findings) {
   const f = normalizeFindings(findings);
   const present = new Set();
-  for (const it of f.items) if (FINDING_KINDS.includes(it?.kind)) present.add(it.kind);
-  for (const c of f.checks) if (c?.status === "still_open" && FINDING_KINDS.includes(c?.kind)) present.add(c.kind);
-  return FINDING_KINDS.filter((k) => present.has(k));
+  for (const it of f.items) if (FINDING_CLASSES.includes(it?.class)) present.add(it.class);
+  for (const c of f.checks) if (c?.status === "still_open" && FINDING_CLASSES.includes(c?.class)) present.add(c.class);
+  return FINDING_CLASSES.filter((k) => present.has(k));
 }
 
 /**
- * 读侧把一条批注里的 `findings` 摊成 `{items, checks}`（双重编码也认）。只认新形状：
- * 2026-09-11 改版时活栈的旧判题已按新口径重判，库里不再有旧形状（web `llmobs-fix-items` 同一条规则）。
+ * 2026-09-13 之前那一版六类批注 → 两类。**读侧宽容只住这一处**（web 侧是 `llmobs-fix-items.ts`，
+ * 同一张表），写侧照旧整包拒（`validateFindings`）。
+ *
+ * 映射的依据是各旧类**当初的判据**，不是名字像不像：
+ *   · `tool` + `verified: online` —— 判官当初真去活系统核过 ⇒ 现在的「确定是 bug」；
+ *   · `tool` 其余（只看轨迹 / 核不到）—— 没有第二条路证明数据本该有 ⇒ 看不出是不是 bug；
+ *   · `skill` / `model` —— 都是「给模型的话」这一侧（旧口径靠「规矩写没写」分这两类，那道分界本身最易判错，D4 已合并）⇒ 说法会误导；
+ *   · `case` —— 题目有问题；
+ *   · `unsure` —— 当初就是弃判 ⇒ 看不出是不是 bug；
+ *   · `env` —— 现场不成立已经不是条目了（是 `verdict: not_reproduced`）⇒ 丢弃。
+ *
+ * 活栈 27 条旧判题重判后整段删。
+ */
+const LEGACY_CLASS = {
+  skill: { class: "needs_decision", decision: "wording" },
+  model: { class: "needs_decision", decision: "wording" },
+  case: { class: "needs_decision", decision: "case" },
+  unsure: { class: "needs_decision", decision: "is_bug" },
+};
+
+const joinParts = (...parts) => parts.map((p) => (typeof p === "string" ? p.trim() : "")).filter(Boolean).join("\n\n");
+
+function fromLegacyItem(it) {
+  const mapped = it.kind === "tool"
+    ? (it.verified === "online" ? { class: "true_bug" } : { class: "needs_decision", decision: "is_bug" })
+    : LEGACY_CLASS[it.kind];
+  if (!mapped) return null;  // env：丢弃
+  const { kind, qualifier, verified, rule_ref: ruleRef, suspected_kind: suspectedKind, suggestion, layer, fix_where: fixWhere, evidence, expected, ...rest } = it;
+  if (mapped.class === "true_bug") {
+    // 旧 `evidence` 就是判定链那段话；旧 `expected` 与新的同义，原样留。
+    return { ...rest, class: "true_bug", how_verified: joinParts(evidence), ...(expected === undefined ? {} : { expected }), legacy: true };
+  }
+  // 要人定这一侧：旧的三段（证据 / 修好该看到什么 / 建议）合起来才是「全部上下文」。
+  return {
+    ...rest,
+    class: "needs_decision",
+    decision: mapped.decision,
+    context: joinParts(evidence, expected, suggestion, ruleRef && `规矩写在：${ruleRef}`),
+    legacy: true,
+  };
+}
+
+/**
+ * 读侧把一条批注里的 `findings` 摊成 `{items, checks}`（双重编码也认），顺带把旧批注按上表读成新形状。
  */
 export function normalizeFindings(value) {
   let v = value;
@@ -757,7 +744,24 @@ export function normalizeFindings(value) {
     try { v = JSON.parse(v); } catch { return { items: [], checks: [] }; }
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return { items: [], checks: [] };
-  return { items: Array.isArray(v.items) ? v.items : [], checks: Array.isArray(v.checks) ? v.checks : [] };
+  const items = [];
+  for (const it of Array.isArray(v.items) ? v.items : []) {
+    if (!it || typeof it !== "object") continue;
+    if (it.class !== undefined || it.kind === undefined) { items.push(it); continue; }
+    const mapped = fromLegacyItem(it);
+    if (mapped) items.push(mapped);
+  }
+  const checks = [];
+  for (const c of Array.isArray(v.checks) ? v.checks : []) {
+    if (!c || typeof c !== "object") continue;
+    if (c.class !== undefined || c.kind === undefined) { checks.push(c); continue; }
+    // 复验条目只带一个 `kind`，没有 `verified`——比原条目少一维，折出来的类别会比原条目粗。
+    // 所以旧 check 一律**不带类别**，让算状态那一步退回原条目的 class（`judge-quality.mjs`），
+    // 那份是按全字段折的。丢掉整条 check 更不行：那等于把「这一轮验过了」抹掉。
+    const { kind, ...rest } = c;
+    checks.push({ ...rest, legacy: true });
+  }
+  return { items, checks };
 }
 
 /**
@@ -809,7 +813,7 @@ export function validateLabels(labels) {
   if (labels.findings !== undefined) problems.push(...validateFindings(labels.findings));
   if (labels.summary !== undefined && typeof labels.summary !== "string") problems.push("summary 必须是字符串");
   if (labels.summary !== undefined && typeof labels.summary === "string" && labels.summary.length > 600) {
-    problems.push(`summary 太长（${labels.summary.length} 字，上限 600）——总评三句以内，细节写进各条改进点`);
+    problems.push(`summary 太长（${labels.summary.length} 字，上限 600）——总评三句以内，细节写进各条问题`);
   }
   for (const k of ["finding_kinds", "fix_marks", "rubric_version"]) {
     if (labels[k] !== undefined) {
@@ -818,7 +822,7 @@ export function validateLabels(labels) {
     }
   }
   for (const k of ["trustworthy", "needs_fix", "lucky_guess", "attribution_tags", "attribution"]) {
-    if (labels[k] !== undefined) problems.push(`${k} 是 2026-09-11 之前的旧词表——结论看 verdict，证据看 evidence，其余都是 findings 里一条条的改进点`);
+    if (labels[k] !== undefined) problems.push(`${k} 是 2026-09-11 之前的旧词表——结论看 verdict，证据看 evidence，其余都是 findings 里一条条的问题`);
   }
   const unknown = Object.keys(labels).filter((k) => !LABEL_SCHEMA.some((l) => l.label === k) && !["trustworthy", "needs_fix", "lucky_guess", "attribution_tags", "attribution"].includes(k));
   if (unknown.length) problems.push(`未知 label：${unknown.join(", ")}（词表见 §7.1）`);

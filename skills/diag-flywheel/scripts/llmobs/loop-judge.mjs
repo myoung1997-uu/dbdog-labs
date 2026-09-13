@@ -147,40 +147,41 @@ if (!process.env.DBDOG_MCP_BEARER?.trim()) {
   fail("判题会话要连 dbdog 取证据，缺 DBDOG_MCP_BEARER（scripts/llmobs/mint-mcp-jwt.mjs 铸）");
 }
 
+// 起判题会话的话。**这段只说「这一轮怎么跑」，判据一个字都不复述**——判据单源在
+// 插件的 `skills/diag-judge/SKILL.md`（包里随包带了一份 `skill/SKILL.md`），
+// 在这里抄一遍，就会出现「校验器按新口径拒、提示词还在要旧字段」那种漂移（2026-09-13 撞过一次）。
 const JUDGE_PROMPT = `本目录是一个**自包含判题包**。请：
 
-1. 先读 \`skill/SKILL.md\`，那是判题口径的正文，严格按它判。
-2. 逐个读 \`cases/<event_id>/\` 下的材料判分。每例的材料可能有：
-   - \`forward.md\`  正向假设树（agent 实际提了哪些假设、各拿什么证据、怎么收口）
-   - \`ground-truth.md\` 答案纸（**可能没有**——没有就是无参照题，按 skill 里的无参照口径判）
-   - \`open-findings.json\` **这道题还没关的条目清单**（脚本按 rubric 那套规则算好的）。
+1. 先读 \`skill/SKILL.md\`，那是判卷口径的正文，严格按它判。本条最优先：下面几条与它冲突时以它为准。
+2. 逐个读 \`cases/<event_id>/\` 下的材料：
+   - \`forward.md\`  正向假设树（agent 实际提了哪些假设、各拿什么证据、怎么收口）——先读它，它是 trace 的结构化摘要
+   - \`ground-truth.md\` 答案纸（**可能没有**——没有就按 skill 里没有答案纸那一档判）
+   - \`open-findings.json\` **这道题还没关的条目清单**（脚本按关单规则算好的，每条带类别）。
      **这上面的每一条都要在 \`findings.checks\` 里复验，一条都不许漏**；
      打过 \`claimed_fixed\` 标记的要特意走到那条路去验——标记是声明，复验才是判决。
-   - \`prior-judgments.json\` 这道题之前几轮判题的全量记录（要看来龙去脉时读它）。
-   - \`reverse.md\`  反向证据链（从答案倒推「本该留下哪些痕迹」）
-   - \`probe.json\`  探针结果（同样的工具、同样的参数由固定代码重放一遍的存否）
-   - \`trace.json\`  原始 span（**几 MB，不要通读**）。\`forward.md\` 已经是它的结构化摘要；
-     只在要核对某一条具体证据时，去里面搜那一条。
-3. **这一轮是「取数判题」，不是「包判题」** —— 包只是把轨迹与答案纸先给你省一次取数，
-   **你手上有 dbdog 工具，该查就查**。skill 里「包判题不能回头追问」那条不适用于本轮。
-   材料里缺的那一件（探针结果 / 反向证据链）就靠现取来补：
-   拿这次诊断的实例与时间窗，去查「模型说没有的那条证据，究竟是它没想到查，还是查了也确实没有」——
-   这是「要修 dbdog」这一项唯一的硬判据（飞轮 D2）。别只凭轨迹猜。
+   - \`prior-judgments.json\` 这道题之前几轮判题的全量记录（要看来龙去脉时读它）
+   - \`reverse.md\` / \`probe.json\`  反向证据链与探针结果（**可能没有**；它们是离线时的替代品）
+   - \`trace.json\`  原始 span（**几 MB，不要通读**），只在核某一条具体证据时进去搜
+3. **这一轮是在线判题** —— 包只是把轨迹与答案纸先给你省一次取数，**你手上有 dbdog 工具，该查就查**，
+   包里没有的自己去取，别把「包里没有」当「不存在」。你有答案纸，就从根因倒推该有哪些证据，
+   逐条去活系统取到手：证明根因本身在、证明 agent 该拿到而没拿到、证明 dbdog 该给而没给。
+   取证路按硬度排：直查库表 > 换一条路（别的工具 / DDSQL / 控制台 / 靶机）> 原样复调。
 4. 产出两个文件，写在本目录下：
-   - \`annotations.jsonl\` 每行一条 JSON，格式见 \`skill/SKILL.md\` 与 \`manifest.json\` 里的 label schema。
+   - \`annotations.jsonl\` 每行一条 JSON，形状见 \`skill/SKILL.md\` 末尾与 \`manifest.json\` 里的 label schema。
      **同一条 trace 只许一行**（重判是覆盖，不是追加）。
-   - \`summary.md\`  本轮总账。
+   - \`summary.md\`  这次诊断的过程分析（修复方开工先读它）。
 
-回流会**整包拒写**的四件事（写之前自己对一遍）：
-- 有答案纸的题必须写 \`findings.roots\`（按答案纸里根因的出现顺序编号，划进 matched / missed，
-  不重不漏），且 \`verdict\` 要与集合对得上：找齐 correct、找到一部分 partial、没找到 wrong；
-  没有答案纸的题 \`verdict\` 只能 unknown，且不写 roots。
-- 每条改进点的 \`span_id\` 指针必须在这条 trace 里真找得到（前 8 位也行，但不能配到两条）。
-- \`tool\` 类要写 \`layer\`（server / agent / hooks / scripts）与 \`repro\`；\`tool\` 与 \`skill\` 类要写
-  \`qualifier\`（missing 缺失 / incorrect 写错 / extraneous 多余）。
-- \`model\` 类要写 \`rule_ref\`（规矩写在哪个 skill 的哪一节）；\`unsure\` 类要写 \`suspected_kind\`。
+回流会**整包拒写**（写之前自己对一遍，拒了这一例几十分钟白跑）：
+- 有答案纸：\`findings.roots\` 每条根因都要表态（按答案纸里的出现顺序编号，划进 matched / missed，不重不漏），
+  且 \`verdict\` 与集合对得上（找齐 correct / 找到一部分 partial / 一条没找到 wrong）；
+  没答案纸只能 \`unknown\` 且不写 roots；现场不成立只能 \`not_reproduced\` 且不写 roots。
+- 每条的 \`span_id\` 指针必须在这条 trace 里真找得到（写前 8 位也行，但不能配到两条）。
+- 确定是 bug（\`class: true_bug\`）三样都要：\`how_verified\` / \`repro\` / \`expected\`。
+- 要人定（\`class: needs_decision\`）三样都要：\`decision\` / \`ask\` / \`context\`。
+- 旧字段写了即拒：\`kind\` / \`qualifier\` / \`verified\` / \`rule_ref\` / \`suspected_kind\` / \`suggestion\` / \`layer\` / \`fix_where\`。
+- \`finding_kinds\` / \`fix_marks\` / \`rubric_version\` 不由你写；\`summary\` ≤ 600 字符。
 
-两条硬规矩：**归因必须指到某条 span 或探针结果的某一行**；**建议必须写清「改哪里」**。
+一句话记住你的位置：**你只判是不是 bug，不说怎么修、不说改哪里**（落点归修复那一棒，它有源码你没有）。
 判不了的照实写判不了，不要猜一个填上。`;
 
 // 积压要报出来，哪怕本轮一条没领：数字悄悄变小很危险——不报，看到的人会以为「都判完了」，
