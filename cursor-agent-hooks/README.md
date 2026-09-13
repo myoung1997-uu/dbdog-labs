@@ -64,7 +64,7 @@ node --test hooks.test.mjs
 | `afterMCPExecution` | `after-mcp-execution.mjs` | tool span（成功） |
 | `postToolUseFailure` | `post-tool-use-failure.mjs` | tool span（失败） |
 | `afterAgentResponse` / `afterAgentThought` | 对应脚本 | llm span |
-| `stop` | `stop.mjs` | root agent span |
+| `stop` | `stop.mjs` + `../claude-code-hooks/case-feed/push.mjs` | root agent span；另推发件箱里的用例（可选能力，见文末） |
 | `subagentStart` / `subagentStop` | 对应脚本 | 子代理共用同一 trace |
 
 ## 环境变量
@@ -77,6 +77,25 @@ node --test hooks.test.mjs
 | `DBDOG_OBS_TRIGGER` | 默认 `诊断:`（全半角冒号都认；`diag:` 恒收） |
 | `DBDOG_OBS_ML_APP` | 分桶名；缺省 = workspace 目录名 |
 | `DBDOG_OBS_DIR` / `DBDOG_OBS_SPANS` | 状态与 spans 路径 |
+
+## 可选能力：给 dbdog 供题（`case-feed`）
+
+上面那些都是**可观测性**（把诊断过程采成 trace）。这一条是另一个能力：把筛出来的用例推给**用例平台**。
+**默认关着** —— 什么都不配就零行为（`push.mjs` 见发件箱空就直接返回，不发任何请求）。
+
+```sh
+export DBDOG_CASE_FEED_URL='http://<用例平台地址>:<端口>'    # 内网/外网两套独立部署，填你该连的那套
+export DBDOG_CASE_FEED_DATA=~/.cursor/dbdog-case-feed       # 材料包与凭证放哪（不设会落到 ~/.claude/ 下）
+node "../claude-code-hooks/case-feed/bootstrap.mjs"         # 手动跑一次：开户 + 取材料包
+```
+
+**为什么要手动跑那一次**：Claude Code 侧有 `SessionStart` 钩子替它做这件事，Cursor 这边没有对应的自举钩子。
+不跑也能用 —— 等真有批次要推时 `push.mjs` 会提示材料包没就绪，那时再跑即可。
+
+之后每轮结束（`stop`）会把 `<项目>/.dbdog-outbox/<批次>/` 里的用例推出去。
+
+⚠️ **Cursor 侧不保证把钩子的输出喂回模型**，所以"推失败"的表现是**批次留在发件箱**
+（成功的会被移进 `sent/`），而不是模型被告知。要确认推没推成功，看那个目录还在不在。
 
 ## 与 Claude kit 的差异（读侧须知）
 

@@ -35,6 +35,17 @@
             "statusMessage": "dbdog-obs: synthesize spans"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/claude-code-hooks/case-feed/push.mjs"],
+            "timeout": 120,
+            "statusMessage": "dbdog-case-feed: push queued cases"
+          }
+        ]
       }
     ],
     "SubagentStop": [
@@ -57,6 +68,17 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/claude-code-hooks/session-start.mjs\"",
             "timeout": 10,
             "statusMessage": "dbdog-obs: sweep backlog"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/claude-code-hooks/case-feed/bootstrap.mjs"],
+            "timeout": 60,
+            "statusMessage": "dbdog-case-feed: onboard"
           }
         ]
       }
