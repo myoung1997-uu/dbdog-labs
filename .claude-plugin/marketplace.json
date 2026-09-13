@@ -3,17 +3,11 @@
   "owner": {
     "name": "dbdog"
   },
-  "description": "dbdog 客户端组件分发仓：Agent 可观测性 hooks（dbdog-agent-obs）+ 给 dbdog 供题的用例推送（dbdog-case-feed）。用户不需要任何 dbdog 私有仓库。",
   "plugins": [
     {
       "name": "dbdog-agent-obs",
       "source": "./",
       "description": "dbdog Agent Observability hooks：铸造/传播/合成 trace + 收尸补发（UserPromptSubmit + PreToolUse + Stop/SubagentStop + SessionStart），子代理内部的工具/模型调用可见（root → Agent → subagent 三层树），装完即挂全局，配 DBDOG_OBS_* 环境变量即用"
-    },
-    {
-      "name": "dbdog-case-feed",
-      "source": "./plugins/dbdog-case-feed",
-      "description": "dbdog 供题：把筛出来的、用来考验 dbdog 系统能力的用例（复现脚本 + manifest）推给用例平台。首次开会话自动开户并取回材料包，之后每轮结束自动推发件箱；失败把平台错误清单回灌给 agent 修正。材料不随插件分发——用的时候现从平台取最新一份，平台改规矩不用发新版"
     }
   ]
 }

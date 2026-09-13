@@ -1,12 +1,8 @@
 # dbdog-labs · 客户端分发仓
 
 dbdog 面向**最终用户**的客户端组件固定分发点。用户不需要任何 dbdog 私有仓库——本仓公开、
-位置稳定，文档与安装命令永远指这里。当前提供两个插件：
-
-| 插件 | 干什么 | 代码在哪 |
-|------|--------|---------|
-| **`dbdog-agent-obs`** | Agent 可观测性：把诊断过程采成 trace 树（Claude Code 走 `claude-code-hooks/`，Cursor 走 `cursor-agent-hooks/`），另带八个 skill | 仓根 |
-| **`dbdog-case-feed`** | 给 dbdog **供题**：把筛出来的、用来考验 dbdog 系统能力的用例推给用例平台 | `plugins/dbdog-case-feed/` |
+位置稳定，文档与安装命令永远指这里。当前内容：**Claude Code Agent Observability hooks**
+（`claude-code-hooks/`，研发说明见其中 README）。
 
 > **默认没有——要装（插件，两条命令）**。装完后：普通消息零足迹；以「诊断:」/「diag:」开头的
 > 消息自动记录成可检查的 trace 树（配 `DBDOG_OBS_MODE=always` 则全量记录）。完整用户文档见
@@ -31,17 +27,6 @@ claude plugin list                                  # 应看到 dbdog-agent-obs@
 hooks 路径由插件机制（`${CLAUDE_PLUGIN_ROOT}`）自动解析，不改任何文件；升级随 marketplace
 自动更新；hooks 在**下一个会话**生效。无插件环境或研发调试需要手动接线时，clone 本仓后按
 `claude-code-hooks/README.md` 操作（settings-snippet 合并法，历史方式，不再出现在用户文档）。
-
-### 另一个插件：`dbdog-case-feed`（给 dbdog 供题）
-
-```sh
-claude plugin install dbdog-case-feed@dbdog-labs
-```
-
-启用时会问一次**用例平台地址** —— 内网、外网是两套独立部署（不同机器/端口/凭证），
-所以没有默认值，必须你给；填错不会报错，只会把用例推到另一个平台。
-装上之后自动开户 + 取材料包，每轮结束自动推发件箱里的用例。
-详见 [`plugins/dbdog-case-feed/README.md`](plugins/dbdog-case-feed/README.md)。
 
 ## 配置（环境变量）
 
@@ -70,8 +55,7 @@ LLM Observability · Traces 刷新，应看到完整的树（根 🌳 + 推理 �
 ## 仓库结构
 
 ```
-.claude-plugin/     marketplace.json + plugin.json（插件安装通道；marketplace 里登记了两个插件）
-plugins/dbdog-case-feed/  dbdog-case-feed 插件本体（自己的 .claude-plugin/ + hooks/ + skills/）
+.claude-plugin/     marketplace.json + plugin.json（插件安装通道）
 hooks/hooks.json    插件 hooks 定义（${CLAUDE_PLUGIN_ROOT} 引用脚本）
 claude-code-hooks/  脚本本体 + 研发 README（含手动接线的历史方式与自检命令）
 skills/span-graph/     span-graph skill：hook span → 假设图 markdown（零模型），入口 scripts/from_spans.mjs（实现在 claude-code-hooks/hypothesis-graph.mjs，SessionEnd 自动出图同一实现）
