@@ -1,0 +1,31 @@
+{
+  "description": "dbdog-case-feed：SessionStart 自举（开户 + 取材料包），Stop 推送（跑 tc-push.sh --outbox，失败回灌错误清单）。两个脚本都用 exec form 起 node——push.mjs 要往 stdout 打 JSON，shell form 会被 profile 的 echo 或引号污染。",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs"],
+            "timeout": 60,
+            "statusMessage": "dbdog-case-feed: 开户并取回材料包"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/push.mjs"],
+            "timeout": 300,
+            "statusMessage": "dbdog-case-feed: 推送发件箱里的用例"
+          }
+        ]
+      }
+    ]
+  }
+}
