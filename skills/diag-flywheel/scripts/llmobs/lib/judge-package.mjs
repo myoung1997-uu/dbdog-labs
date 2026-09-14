@@ -5,10 +5,10 @@
 //     条目与闭环 §13.3、修复 loop §14；export 写进 manifest、import 按 manifest 的 id 回写、
 //     判题 skill 正文（labs `skills/diag-judge/SKILL.md`）按同一张表判——三处共用本文件。
 //   · 探针 outcome 四值与同事 skill `evidence-chain` 同口径（`../dbdog-labs/skills/evidence-chain/scripts/check_chain.py` 是它的守门）。
-//   · 假设树**只认 span tags**（`hypothesis_id` / `parent_hypothesis_id` / `hypothesis` / `expect` /
+//   · 新调查图直接消费 hook 生成的明确记录视图，不在判题侧重复解析协议。历史树只认 span tags（`hypothesis_id` / `parent_hypothesis_id` / `hypothesis` / `expect` /
 //     `resolve`），不在这里再写一份 intent 解析器——那份在 dbdog-labs 的 `claude-code-hooks/hypothesis.mjs`
 //     与 dbdog-web 的 `src/lib/llmobs-hypothesis-tree.ts`，书写约定单源是
-//     `clients/diag-workdir-template/HYPOTHESIS.md`。tags 没有 = 那次会话没按约定写，如实说，别猜。
+//     `clients/diag-workdir-template/HYPOTHESIS.md`。派生图缺失不证明 agent 没有提出假设。
 
 /** 版本章五键（D6）。谁经手谁盖，都在 root span 的 tags 上。 */
 export const STAMP_KEYS = ["hooks_version", "mcp_version", "skills_digest", "tools_digest", "server_version"];
@@ -323,7 +323,7 @@ function clip(s, n) {
  * `forward.md`：正向假设树 + 按时间的工具调用 + root 结论。
  * 与 span-graph 的 `forward-path.md` 同构（假设树 / 出现顺序 / 收口 / 未挂到假设的调用）。
  */
-export function renderForward(spans, { eventId = "", traceId = "" } = {}) {
+export function renderForward(spans, { eventId = "", traceId = "", investigationGraph = null } = {}) {
   const root = rootSpanOf(spans);
   const { nodes, calls, unlabeled } = hypothesisTreeFromSpans(spans);
   const lines = [];
@@ -335,14 +335,37 @@ export function renderForward(spans, { eventId = "", traceId = "" } = {}) {
   lines.push(`- 版本章：${STAMP_KEYS.map((k) => `${k}=${stamp[k] ?? "未盖"}`).join("　")}`);
   lines.push("");
 
-  if (nodes.size === 0) {
+  const response = investigationGraph;
+  const inv = response?.graph?.investigation;
+  const view = inv?.views?.hypothesis_view;
+  const currentTrace = traceId || root?.trace_id;
+  const explicitSpans = (spans ?? []).filter(s => ["llm", "agent"].includes(s.kind) && /```dbdog-investigation\s/.test(s.output_local ?? s.output ?? ""));
+  const usable = response?.status === "ok" && response.trace_id === currentTrace && response.stale === false &&
+    inv?.version === 1 && Array.isArray(view?.nodes) && Array.isArray(view?.edges) && Array.isArray(view?.relations);
+  if (usable) {
+    lines.push("## 明确调查记录", "", "以下为当前 trace 的派生视图。节点状态由诊断模型声明；引用匹配不等于归因正确。原文见 trace.json，完整记录与覆盖信息见 investigation.json。", "");
+    lines.push(`- 问题：${view.root?.question ?? "未记录"}；状态：${view.root?.state ?? "未记录"}`);
+    for (const n of view.nodes) {
+      lines.push(`- **[${n.id}]** ${n.claim} — ${n.state}`);
+      lines.push(`  - 判定：${n.decision_summary ?? "未记录"}；引用检查：${n.reference_check ?? "未记录"}`);
+      const refs = (n.key_evidence ?? []).flatMap(o => (o.sources ?? []).map(s => `${o.observation}: ${s.ref}`));
+      if (refs.length) lines.push(`  - 证据入口：${refs.join("；")}`);
+    }
+    lines.push("", "### 追问方向（不表示因果已证明）");
+    for (const e of view.edges) lines.push(`- ${e.from} → ${e.to}：${e.reason}`);
+    if (view.unplaced?.length) lines.push(`- 未关联：${view.unplaced.join("、")}`);
+    lines.push("", "### 独立因果与条件关系");
+    for (const r of view.relations) lines.push(`- ${r.id}: ${[r.from].flat().join(" + ")} → ${r.to}；${r.type}；${r.state}；${r.claim ?? ""}`);
+    if (view.root?.state !== "active" && view.conclusion) lines.push("", `记录的结束理由：${view.conclusion.reason}`, `结论采用假设：${(view.conclusion.answer_hypotheses ?? []).join("、")}`);
+    else lines.push("", "当前没有有效结束记录；不能把此前 finish 当作当前结束。");
+    if (inv.diagnostics?.length) lines.push(`记录检查存在 ${inv.diagnostics.length} 项缺口；见 investigation.json。这不自动构成 agent 或 skill 缺陷。`);
+  } else if (explicitSpans.length || inv) {
+    lines.push("## 明确调查记录", "", "派生调查图缺失、版本不支持、范围不匹配或覆盖落后；不以旧 hypothesis_id 判断新协议是否记录了假设。请核对 trace.json 中的实际声明及工具返回。", "");
+    for (const s of explicitSpans) lines.push(`- 明确事件入口：span \`${s.span_id}\``);
+  } else if (nodes.size === 0) {
     lines.push("## 假设树");
     lines.push("");
-    lines.push("**本 trace 未按约定书写（span 上没有 `hypothesis_id`），只有调用序列。**");
-    lines.push("");
-    lines.push("约定见 `clients/diag-workdir-template/HYPOTHESIS.md`。判题时 `hypothesis_missing` /");
-    lines.push("`tool_misuse` / `reasoning_error` 这三类归因**判不了**（分不清「没想到」和「想到了没写」），");
-    lines.push("按 `scaffold` 记一条，别把它算成 agent 的假设层问题。");
+    lines.push("没有可用的派生假设记录，以下保留调用序列。核对 trace.json 中的原始声明；缺少旧 hypothesis_id 本身不能证明 agent 没有提出假设，也不能自动归为 skill 缺陷。");
   } else {
     lines.push("## 假设树");
     lines.push("");
@@ -370,6 +393,7 @@ export function renderForward(spans, { eventId = "", traceId = "" } = {}) {
   lines.push("");
 
   lines.push("## 工具调用（按时间）");
+  if (usable || explicitSpans.length || inv) lines.push("新协议的检查与证据关联见调查记录；下表的假设列仅为历史 tags，不用于补造关联。");
   lines.push("");
   // span 列不是装饰：每条问题的 pointers 要指到 span_id，回流会拿它跟 trace.json 对。
   // 而判官被告知「trace.json 几 MB 不要通读，看 forward.md」——摘要里不打 span_id，

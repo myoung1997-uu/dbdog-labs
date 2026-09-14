@@ -413,6 +413,11 @@ export async function getTrace(traceID) {
   return call("GET", `/api/v2/llmobs/trace/${encodeURIComponent(traceID)}`);
 }
 
+/** 当前 trace 的派生图及覆盖状态；原始 span 仍通过 getTrace 获取。 */
+export async function getTraceGraph(traceID) {
+  return call("GET", `/api/v2/llmobs/trace/${encodeURIComponent(traceID)}/graph`);
+}
+
 /** 一页 experiment events 摘要（server 侧 limit 上限 20，靠 offset 翻）。 */
 export async function searchExperimentEvents(experimentID, { limit = 20, offset = 0 } = {}) {
   return call("POST", `/api/v2/llmobs/experiments/${encodeURIComponent(experimentID)}/events/search`, { limit, offset });
