@@ -17,19 +17,19 @@ export function demoSpans() {
   ];
   const raw = 'DEMO ONLY: A waits on B on orders for 42s; B idle in transaction; pool 20/20 occupied; CPU 12%; B commits then releases locks; payment call spans 40s inside B; retries unavailable';
   const observations = [
-    ['O1', ['H1', 'H4'], 'A waits on B on orders for 42s', 'supports', '样本明确给出对象、阻塞者及持续时间'],
-    ['O2', ['H2'], 'pool 20/20 occupied', 'supports', '同一窗口连接全部占用；结合事务身份判断等待传播'],
-    ['O3', ['H3'], 'CPU 12%', 'refutes', '本示例窗口的 CPU 不支持饱和解释'],
-    ['O4', ['H5'], 'payment call spans 40s inside B', 'supports', '调用时间被事务 B 包含，覆盖主要等待'],
-    ['O5', ['H6'], 'B commits then releases locks', 'refutes', '事务提交时正常释放锁'],
-    ['O6', ['H7'], 'retries unavailable', 'inconclusive', '没有重试记录，无法判断放大因素'],
+    ['O1', ['H1', 'H4'], 'A waits on B on orders for 42s', 'supports', '样本明确给出对象、阻塞者及持续时间', '事务 A 在 orders 上被事务 B 阻塞，已等待 42 秒'],
+    ['O2', ['H2'], 'pool 20/20 occupied', 'supports', '同一窗口连接全部占用；结合事务身份判断等待传播', '连接池的 20 个连接全部被占用'],
+    ['O3', ['H3'], 'CPU 12%', 'refutes', '本示例窗口的 CPU 不支持饱和解释', '同一时间窗口的数据库 CPU 使用率为 12%'],
+    ['O4', ['H5'], 'payment call spans 40s inside B', 'supports', '调用时间被事务 B 包含，覆盖主要等待', '事务 B 内的支付调用持续 40 秒'],
+    ['O5', ['H6'], 'B commits then releases locks', 'refutes', '事务提交时正常释放锁', '事务 B 提交后释放了锁'],
+    ['O6', ['H7'], 'retries unavailable', 'inconclusive', '没有重试记录，无法判断放大因素', '未取得支付端重试记录'],
   ];
   const initial = message('start', 1, [
     e('checkpoint', { question: '【演示数据】checkout SQL 延迟与连接耗尽为什么同时发生？', scope: '人工协议示例 · 实例 demo-db · 10:00–10:05', findings: [], unresolved: [], next: { action: '定位等待与资源占用', reason: '把笼统延迟落到对象和窗口' } }),
     ...hypotheses.slice(0, 3).flatMap(([hypothesis, claim, parents]) => [e('hypothesis', { hypothesis, claim }), e('branch', { hypothesis, parents, reason: '进一步解释父节点中的现象；因果联系另行检验' })]),
     e('check', { check: 'C1', mode: 'test', hypotheses: ['H1', 'H2', 'H3'], purpose: '对照同一窗口的阻塞链、连接占用与 CPU', expect: '区分锁等待、连接耗尽和 CPU 饱和' }),
   ]);
-  const results = observations.map(([observation, ids, quote, effect, reason]) => e('evidence', { observation, check: ['O4','O5'].includes(observation) ? 'C2' : observation === 'O6' ? 'C3' : 'C1', summary: reason,
+  const results = observations.map(([observation, ids, quote, effect, reason, summary]) => e('evidence', { observation, check: ['O4','O5'].includes(observation) ? 'C2' : observation === 'O6' ? 'C3' : 'C1', summary,
     sources: [{ ref: ['O4','O5'].includes(observation) ? 'E:lifecycle' : observation === 'O6' ? 'E:retention' : 'E:sample', quote }], links: ids.map(hypothesis => ({ hypothesis, effect, aspect: 'activation', reason })) }));
   const states = [['H1','supported',['O1']], ['H2','supported',['O1','O2']], ['H3','refuted',['O3']], ['H4','supported',['O1']], ['H5','supported',['O4']], ['H6','refuted',['O5']], ['H7','inconclusive',['O6']]];
   // O1 对 H2 的传播判断也有明确关联；不是按相邻步骤猜测。
