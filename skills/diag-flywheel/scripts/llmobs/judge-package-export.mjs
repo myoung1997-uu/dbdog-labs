@@ -20,26 +20,22 @@
 //                        /reverse.md|.json  反向证据链（record.metadata.reverse_chain；缺则不产）
 //                        /ground-truth.md   答案纸（expected_output；缺则不产 = 无参照题）
 //                        /probe.json    探针结果（由 probe.mjs 写；已有则原样保留）
-//                        /prior-judgments.json  这道题**之前几轮**的判题（问题 items、复验 checks、修复标记，旧的在前）；
-//                                       判这一轮时逐条复验还没关的（飞轮设计 §13.3）。空数组 = 之前没判过
+//   <dir>/skill/references/output.md  本版输出契约；不导出历史判题和修复状态
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { openFindings, isBeforeDiagnosis } from "./lib/judge-quality.mjs";
 import {
   baseUrl, findProject, loadDataset,
   listAnnotationQueues, upsertAnnotationQueue, listAnnotationLabels, replaceAnnotationLabels,
   addAnnotationInteractions, listAllExperimentEvents, getExperimentEvent, getTrace, getTraceGraph,
-  resolveExperimentRef, findAllAnnotationsByContent,
+  resolveExperimentRef,
   requireCredential,
 } from "./lib/exp-client.mjs";
 import {
   LABEL_SCHEMA, QUEUE_NAME, renderForward, renderReverse, renderGroundTruth,
-  hasGroundTruth, rootSpanOf, stampOf, priorJudgments, diagnosisTimeOf,
+  hasGroundTruth, rootSpanOf, stampOf,
 } from "./lib/judge-package.mjs";
-import { runsOfRecords, asJudgedRuns } from "./lib/dataset-traces.mjs";
-import { caseHistoryOfRecords } from "./lib/case-diag-client.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const argOf = (name, dflt) => {
@@ -138,15 +134,7 @@ if (recordsReason) console.error(`⚠ 反向证据链本轮全缺：${recordsRea
 
 const { queueID, labels } = await ensureQueue(project.id);
 
-// 之前几次诊断：这一包里每道题的全部运行，连同批注、判题表快照、诊断时间一次取齐；
-// 每一例再按**这一例那次诊断**截出更早的（§15.5：时间轴是诊断时间，同一条 trace 自己的不算）。
-// 修没修好由后续诊断的复验说了算（飞轮设计 §13.3），判题方得先看到之前提过哪些条目。
-const packRecordIDs = [...new Set(events.map((e) => e.dataset_record_id).filter(Boolean))];
-const runsByRecord = new Map();
-for (const [rid, list] of await runsOfRecords({ projectID: project.id, recordIDs: packRecordIDs })) runsByRecord.set(rid, asJudgedRuns(list));
-const priorInteractions = await findAllAnnotationsByContent([...runsByRecord.values()].flat().map((r) => r.traceId));
-const caseLayers = await caseHistoryOfRecords(packRecordIDs);
-
+// 单次判题不查询历史运行、批注或修复状态。
 fs.mkdirSync(path.join(OUT, "cases"), { recursive: true });
 fs.mkdirSync(path.join(OUT, "skill"), { recursive: true });
 
@@ -164,8 +152,11 @@ for (const summary of events) {
     const trace = await getTrace(traceID);
     if (trace?.status === "not_found") missing.push("trace（server 里查不到这条 trace）");
     else {
-      spans = trace?.spans ?? [];
-      fs.writeFileSync(path.join(caseDir, "trace.json"), JSON.stringify(trace, null, 1));
+      spans = (trace?.spans ?? []).map((span) => ({
+        ...span,
+        ...(span.tags ? { tags: Object.fromEntries(Object.entries(span.tags).filter(([key]) => !key.startsWith("evaluation."))) } : {}),
+      }));
+      fs.writeFileSync(path.join(caseDir, "trace.json"), JSON.stringify({ status: trace?.status, trace_id: traceID, span_count: spans.length, spans }, null, 1));
     }
   } else {
     missing.push("trace（event 没有 trace_id——那次跑批 hooks 没生效或超时被杀）");
@@ -213,22 +204,10 @@ for (const summary of events) {
     missing.push("ground-truth（**题坏了**：expected_output 里没有根因，本例 verdict 只能填 unknown）");
   }
 
-  const allRounds = priorJudgments(runsByRecord.get(recordID) ?? [], priorInteractions, caseLayers);
-  // 这一例那次诊断的时间：诊断表 / trace 开始时刻（priorJudgments 已按这个次序取好）；这条 trace 不在运行里就用 event 时刻
-  const thisDiagnosis = {
-    traceId: traceID,
-    diagnosedAt: diagnosisTimeOf(allRounds.find((r) => r.trace_id === traceID))
-      || (summary.timestamp_ms ? new Date(summary.timestamp_ms).toISOString() : (run.created_at ?? "")),
-  };
-  const prior = allRounds.filter((r) => isBeforeDiagnosis(r, thisDiagnosis));
-  fs.writeFileSync(path.join(caseDir, "prior-judgments.json"), JSON.stringify(prior, null, 1));
-
-  // **待复验清单随包走**：rubric 要判题方「开判第一件事就是拿这份清单」，但判题会话的
-  // 工作目录是这个临时包，里面既没有 `case-history.mjs` 也没有凭证——照 rubric 做不到，
-  // 只能退回「自己在几十条历史里推」，正是那条规则要取代的做法。这里把脚本算好的结果放进包。
-  const open = openFindings(allRounds, { before: thisDiagnosis });
-  fs.writeFileSync(path.join(caseDir, "open-findings.json"), JSON.stringify(open, null, 1));
-  if (open.length) console.error(`  · 待复验 ${open.length} 条：${open.map((o) => o.key).join("、")}`);
+  // 复用导出目录时清掉旧导包生成的历史材料，避免重判受到旧结论影响。
+  for (const old of ["prior-judgments.json", "open-findings.json"]) {
+    fs.rmSync(path.join(caseDir, old), { force: true });
+  }
 
   // 探针结果由 probe.mjs 写进本目录；重跑 export 不覆盖已有的那份。
   const probePath = path.join(caseDir, "probe.json");
@@ -267,7 +246,6 @@ for (const summary of events) {
     record_id: recordID,
     expected_roots: expectedRoots,
     status: event?.status ?? summary.status ?? "",
-    prior_rounds: prior.length,
     stamp: stampOf(rootSpanOf(spans)),
     span_count: spans.length,
     missing,
@@ -294,6 +272,10 @@ const RUBRIC_CANDIDATES = [
 const rubric = RUBRIC_CANDIDATES.find((p) => fs.existsSync(p));
 if (!rubric) fail(`找不到判卷口径 diag-judge/SKILL.md（找过：${RUBRIC_CANDIDATES.join(" / ")}）——它住在插件 dbdog-agent-obs 的 skills/diag-judge/`);
 fs.copyFileSync(rubric, path.join(OUT, "skill", "SKILL.md"));
+const outputContract = path.join(path.dirname(rubric), "references", "output.md");
+if (!fs.existsSync(outputContract)) fail(`判题输出契约不存在：${outputContract}，请同步新版 diag-judge skill`);
+fs.mkdirSync(path.join(OUT, "skill", "references"), { recursive: true });
+fs.copyFileSync(outputContract, path.join(OUT, "skill", "references", "output.md"));
 
 /**
  * 这一版判卷口径的身份：`<插件版本>+<正文前 12 位 sha256>`。
@@ -304,7 +286,7 @@ fs.copyFileSync(rubric, path.join(OUT, "skill", "SKILL.md"));
  */
 function rubricIdentity(rubricPath) {
   const body = fs.readFileSync(rubricPath);
-  const sha = createHash("sha256").update(body).digest("hex").slice(0, 12);
+  const sha = createHash("sha256").update(body).update("\0references/output.md\0").update(fs.readFileSync(outputContract)).digest("hex").slice(0, 12);
   let version = "unknown";
   let dir = path.dirname(rubricPath);
   for (let i = 0; i < 4; i++) {
@@ -321,6 +303,7 @@ function rubricIdentity(rubricPath) {
 }
 
 const manifest = {
+  judgement_scope: "current",
   generated_at: new Date().toISOString(),
   server: baseUrl(),
   project: { id: project.id, name: PROJECT },
@@ -344,36 +327,13 @@ const manifest = {
 };
 fs.writeFileSync(path.join(OUT, "manifest.json"), JSON.stringify(manifest, null, 1));
 
-fs.writeFileSync(path.join(OUT, "skill", "README.md"), `# 在蓝区离线判这一包
+fs.writeFileSync(path.join(OUT, "skill", "README.md"), `# 离线判当前诊断
 
-蓝区没有 dbdog、连不上 server，判题模型**不能回头追问**——材料就这一包，缺什么如实写进 \`summary.md\`。
-
-## 三步
-
-1. 读 \`../manifest.json\`：有几例、label schema 是哪一版（\`id\` 一栏回写时要用，别改）。
-2. 把 \`SKILL.md\`（本目录）当 rubric，逐例读 \`../cases/<event_id>/\` 下的四件套：
-   \`forward.md\`（agent 实际走的路）、\`reverse.md\`（本该走的路 + 真取到的证据）、
-   \`ground-truth.md\`（答案纸；不存在 = 无参照题，\`verdict\` 填 \`unknown\`）、
-   \`probe.json\`（探针结果；不存在 = 没跑，「确定是 bug」只能靠 trace 内两两对照抓，多半只够判到「看不出是不是 bug」）、
-   \`prior-judgments.json\`（这道题之前几轮提过的问题、复验与修复标记；还没关的每一条都要在 \`findings.checks\` 里复验）。
-   \`trace.json\` 是 server 导出的原样 span，需要抠细节时看它。
-3. 产两个文件写到**包根**（不是本目录）：
-   - \`annotations.jsonl\`：每例一行 \`{"trace_id":"…","labels":{…}}\`，形状见 SKILL.md；
-   - \`summary.md\`：本轮总账（判了几例、结论与证据的分布、问题按 \`key\` 聚合的清单（带类别：确定是 bug / 要人定）、本轮复验几条修好 / 仍在、最该先修的三条、判不动的地方）。
-   改了反向链就把修订写到 \`reverse-chain-revisions/<record_id>.md\`（和 \`.json\`）。
-
-## 回黄区之后
-
-把整包搬回黄区，跑：
-
-\`\`\`sh
-node scripts/llmobs/judge-package-import.mjs --package <包目录> --annotator <判题模型名>
-\`\`\`
-
-\`--annotator\` 必填（或导出时带 \`--judge-model\`）：两轮结论不一样时，得分得清是 agent 变了还是判题换了。
-
-它按 manifest 里的 label id 回写批注、把总账挂到 run metadata、把反向链修订挂回用例。
-**幂等**：重跑就是覆盖，改判不用先删。
+读 SKILL.md 与 references/output.md，再读取 ../manifest.json 列出的当前诊断材料。
+只评价这些 trace，不读取历史判题、修复状态或旧的 evaluation 标签。
+无法在线取证时如实记录限制，不把缺材料当作缺陷或现场未出现。
+在包根写 annotations.jsonl；summary.md 按完整 trace_id 分段说明各例结果。
+不生成复验 checks，不修改反向链或用例；回流由外部 judge-package-import.mjs 执行。
 `);
 
 const noTrace = cases.filter((c) => !c.trace_id).length;

@@ -53,7 +53,7 @@ node $S/llmobs/probe.mjs --case <判题包>/cases/<event_id> --mcp-http
 ```
 
 探针拿反向链里每条证据,**用固定代码、固定参数**去调同一批 dbdog 工具重放一遍:
-脚本能拿到而模型没拿到 = 模型的问题;脚本也拿不到 = dbdog 的问题。四种结果:
+探针结果用于核实偏差，脚本也拿不到并不直接证明 dbdog 有缺陷，还要排除权限、窗口和数据本来不存在等条件。四种结果:
 有 / 无 / 工具没注册 / 无权限——后两种正是 dbdog 的需求信号。
 
 需要 `DBDOG_MCP_URL`(你连的那个 MCP 地址)与 `DBDOG_MCP_BEARER`。
@@ -64,25 +64,22 @@ node $S/llmobs/probe.mjs --case <判题包>/cases/<event_id> --mcp-http
 node $S/llmobs/judge-package-export.mjs --experiment <run 名或 uuid> --out ./pkg
 ```
 
-包是自包含的(判题方不能回头追问,所以材料一次给全):`manifest.json` + 判题 skill 正文 +
-每例的 `trace.json` / `forward.md`(正向假设树)/ `reverse.md` / `ground-truth.md` / `probe.json` /
-`prior-judgments.json`(比这一例那次诊断更早的诊断提过的改进点与修复标记——判这一例要逐条复验还没关的;这条 trace 自己提的不算)。
+包内含 `manifest.json`、判题 skill 正文及 `references/output.md`，每例的
+`trace.json` / `forward.md` / `reverse.md` / `ground-truth.md` / 可选 `probe.json`。
+不带历史判题、修复标记或未关闭问题；trace 去掉已有 `evaluation.*` 标签。
 
-判卷口径在本插件的 **`diag-judge`** skill（`skills/diag-judge/SKILL.md`,导包时会拷一份进 `./pkg/skill/`）。
-能连上 server 就直接在会话里说「判一下这条 trace <trace_id>」——在线判是默认,判官会去活系统主动查证;
-连不上才把 `./pkg` 交给离线会话按包里那份判。两种都产出 `annotations.jsonl` + `summary.md`,然后:
+按本插件 **`diag-judge`** 的方法与输出契约评价本次诊断，必要时只读核实。
+产出 `annotations.jsonl` + `summary.md`，然后回流：
 
 ```bash
 node $S/llmobs/judge-package-import.mjs --package ./pkg --annotator <判题模型名>
 ```
 
-`--annotator` 必填:两轮结论不一样时,得分得清是 agent 变了还是判题换了。
-判卷回答三件事:**结论对不对**(对 / 部分对 / 错 / 判不了)、**证据撑不撑得住**、**问题一条一条**
-(`findings.items`,每条带稳定 key,只分两类:确定是 bug——判官自己核实了是确定性的,交判定链 / 要人定——说法会误导、缺能力、题目有问题、看不出是不是 bug,交全部上下文),
-之前几轮提过的写复验(`findings.checks`);一段话塞好几处改动、或 2026-09-11 之前的「可信 / 要修 / 蒙对」词表,import 会整包拒。
+`--annotator` 必填。判题只交根因命中、证据、当前问题和限制；`class` 表示确定是 bug / 要人定，
+`issue_type` 表示 tool / skill / case。判题不提供修复方案、不复验历史条目，具体字段只看输出契约。
 
 修完一条问题(修复走 `fix-run` skill,以用例为维度):部署、判断历史数据、在挖出它的那次诊断的原窗口复测,再打标记。
-确定是 bug 的复测通过即关;其余的由之后更晚跑出来的诊断复验说了算(标记是声明,复验才是判决):
+确定是 bug 的复测通过即关；其余保留修复状态，统一审视由外部流程负责，不派给单次判题:
 
 ```bash
 node $S/llmobs/fix-mark.mjs --trace <挖出它的 trace_id> --key <改进点 key> --status claimed_fixed \
@@ -94,14 +91,14 @@ node $S/llmobs/fix-mark.mjs --trace <挖出它的 trace_id> --key <改进点 key
 导入后 server 自动把批注投影成三处:批注原件、experiment 的分数、trace root 上的
 `evaluation.*` 标签。**判题方只交一次**。
 
-> 之前几轮的改进点用 `node $S/llmobs/case-history.mjs --record <record_id> --before <trace_id>` 拿。
+> 历史查询供修复与汇总流程使用，不是单次判题的输入。
 > 包是给「判题模型在连不上 dbdog 的环境里」准备的。
 
 ### ④ 去控制台看
 
 - **用例集**:「历次」一次运行一行,「判题」同一行写那一次判成什么;点开看这道题的**改进点**——
   每条带类别、状态(没修好 / 改了，等复测 / 复测通过 / 复测没过 / 数据修不回来，等下次诊断和判题时验证 / 改了，等下次判题验证 / 要人协助 / 不修 / 修好了),
-  修没修好看复测与之后更晚跑出来的诊断的复验;要不要再跑、从哪一步跑,在页面上点「复现 / 诊断 / 判题」
+  修没修好看修复方复测；旧判题的复验记录仍可展示；要不要再跑、从哪一步跑,在页面上点「复现 / 诊断 / 判题」
 - **用例诊断日志**:每行带判题结果 chip 与所属轮次,可筛「只看未判 / 只看有 dbdog 要修的 / 只看要人看的」
 - **跑批页**:run 列表与对比
 

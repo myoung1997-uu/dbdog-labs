@@ -37,46 +37,30 @@ export const QUEUE_NAME = "diag-judge";
 export const VERDICTS = ["correct", "partial", "wrong", "unknown", "not_reproduced"];
 
 export const LABEL_SCHEMA = [
-  { label: "verdict", value_type: "categorical", options: VERDICTS, display: "结论对不对：对 / 部分对 / 错 / 判不了（没答案纸） / 这次现场不成立" },
-  { label: "evidence", value_type: "categorical", options: ["solid", "weak"], display: "证据撑不撑得住结论" },
-  { label: "findings", value_type: "json", display: "问题（一条一个：确定是 bug / 要人定）+ 对之前几轮条目的复验" },
+  { label: "verdict", value_type: "categorical", options: VERDICTS, display: "预期根因命中：全部 / 部分 / 未命中 / 无法判断 / 现场不成立" },
+  { label: "evidence", value_type: "categorical", options: ["solid", "weak", "unknown"], display: "证据撑不撑得住结论" },
+  { label: "findings", value_type: "json", display: "本次问题、判定依据、行为观察与评价限制" },
   { label: "finding_kinds", value_type: "json", display: "这一次有哪两类问题（由 import 从 findings 算出，筛选用）" },
+  { label: "finding_types", value_type: "json", display: "本次问题类型（tool / skill / case，由 import 推导）" },
   { label: "summary", value_type: "string", display: "总评（大白话，≤ 600 字符）" },
   { label: "fix_marks", value_type: "json", display: "修复标记（改了等复测 / 复测通过 / 复测没过 / 要人协助 / 不修；fix-mark.mjs 写）" },
   { label: "rubric_version", value_type: "string", display: "判的是哪一版判卷口径（由 import 从包里记的那份写）" },
 ];
 
-/** 判题方要写的 label（其余两个由脚本写）。 */
+/** 判题方要写的 label（其余由外部脚本维护）。 */
 export const JUDGE_WRITTEN_LABELS = ["verdict", "evidence", "findings", "summary"];
 
-export const EVIDENCE_VALUES = ["solid", "weak"];
+export const EVIDENCE_VALUES = ["solid", "weak", "unknown"];
 
-/**
- * 问题两类（§7.1 / D4，2026-09-13 三改）。**分类只问一句：判官自己核实了它是确定性的错吗？**
- * 顺序就是 `finding_kinds` 的输出顺序。
- *
- * · `true_bug`       —— 原样重放同样错，**并且**从另一条路（直查库表 / 别的工具 / DDSQL / 控制台 /
- *                       对照实例）证明数据本该有；或报错可原样重现。含 hooks、跑批脚本这类代码错。
- *                       交 `how_verified` / `repro` / `expected`，下游按判定链自动修。
- * · `needs_decision` —— 核实不了对错，只能把观察摆出来让人定。交 `decision` / `ask` / `context`。
- *
- * 为什么不再分得更细：判官替下游做的分类下游不消费（owner 2026-09-13：「你真的判断出了是工具真的
- * bug，你也不用告诉我继续去怎么分类的更细，给你下游给到必要的信息更为关键」）。
- * 类名不叫 `needs_human`——修复标记 `fix_marks[].status` 里已经有一个 `needs_human`（修的人说要人协助），
- * 两件事不能同名。
- */
+/** 判定类别与问题类型独立；不据此猜修复仓库。 */
 export const FINDING_CLASSES = ["true_bug", "needs_decision"];
-
-/**
- * 要人定的是**哪一种决定**（§7.1）。分的不是「谁的锅」，是「人要拍的是什么板」：
- *
- * · `wording`    说法会误导：给模型的话（skill 正文 / 工作目录模板 / 派单提示词）。判官不说对错，
- *                只说明它把模型引向哪个方向、产生什么误解；「该写的没写」也算。非确定性 ⇒ 关单要连续两轮。
- * · `capability` 缺能力：dbdog 没这个工具 / 采集项 / 字段，补上影响面大，所以要人拍板。
- * · `case`       题目有问题：答案纸与证据矛盾、题面缺时间窗或必要信息、没有答案纸。
- * · `is_bug`     看不出是不是 bug：直查、换路、控制台三条路都走了，仍分不开「丢了」和「本来就没有」。
- *                这一档就是**弃判**，聚合时单独计（Autorubric 的 CANNOT_ASSESS 同理：与判值并列，不混进产量）。
- */
+export const ISSUE_TYPES = ["tool", "skill", "case"];
+/** 旧 kind 只用于保留已有类型，不能从 class 反推。 */
+export function issueTypeOf(item) {
+  if (ISSUE_TYPES.includes(item?.issue_type)) return item.issue_type;
+  return ISSUE_TYPES.includes(item?.kind) ? item.kind : null;
+}
+/** 要人核实或决定什么；未确认缺陷与已知缺口需取舍都属于 needs_decision。 */
 export const DECISIONS = ["wording", "capability", "case", "is_bug"];
 
 /** 判官写不了的旧字段：出现即整包拒（读侧另有 `normalizeFindings` 的宽容映射）。 */
@@ -565,24 +549,29 @@ function pointerProblems(where, pointers, required) {
 
 const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
 
-/**
- * `findings` 的形状（§13.3）：
- * `{ roots, items: [{key, class, title, pointers, …按类必填}], checks: [{key, status, class?, pointers, note}] }`。
- *
- * - items：这一轮新发现的问题，一条一个。两类都要 `key` / `class` / `title` / `pointers`；
- *   `true_bug` 另要 `how_verified`（怎么核出来的判定链）/ `repro`（一条能跑的调用）/ `expected`（修好后重放该看到什么）；
- *   `needs_decision` 另要 `decision`（定的是哪一种）/ `ask`（一句「请定：…」）/ `context`（全部上下文）。
- * - checks：这道题之前几轮提过、还没关的，逐条复验（`fixed` / `still_open` 必须指到证据，`still_open` 还要带 `class`）。
- *
- * **写侧严格**：`RETIRED_ITEM_FIELDS` 里的旧字段出现即整包拒——判官写了旧字段，说明它读的是旧口径，
- * 那这一例的分类多半整体不可信，收下忽略比拒还坏（此前 `layer` / `fix_where` 就是收下忽略的，
- * 于是没人知道那一例是按哪一版口径判的）。读侧的宽容在 `normalizeFindings`，只住那一处。
+/** 当前输出契约在 diag-judge/references/output.md；无 scope 的旧包沿用历史校验以兼容在途产物。
+ * 新包必须 scope=current，禁止 checks。读取旧字段的转换只住 normalizeFindings。
  */
 export function validateFindings(a) {
   const problems = [];
   if (!a || typeof a !== "object" || Array.isArray(a)) return ["findings 必须是对象"];
   if ("fix_where" in a && !("items" in a)) {
-    return ["findings 是旧形状（顶层一段 fix_where）——改成 items[] 一条一个问题、checks[] 复验之前几轮提过的（判卷口径「有哪些问题」一节）"];
+    return ["findings 是旧形状（顶层一段 fix_where）——改成当前输出契约：items[] 一条一个问题"];
+  }
+  if (a.scope !== undefined && a.scope !== "current") problems.push("findings.scope 只能是 current");
+  if (a.scope === "current") {
+    if (a.checks !== undefined) problems.push("单次判题不输出 findings.checks，不读取或复验历史问题");
+    if (typeof a.rationale !== "string" || !a.rationale.trim()) problems.push("findings.rationale 必填：本次根因与证据判定依据");
+    if (!Array.isArray(a.items)) problems.push("findings.items 必须是数组");
+    if (!Array.isArray(a.limitations) || a.limitations.some((x) => typeof x !== "string" || !x.trim())) {
+      problems.push("findings.limitations 必须是非空字符串的数组（无限制写 []）");
+    }
+    if (!Array.isArray(a.observations)) problems.push("findings.observations 必须是数组");
+    for (const [i, observation] of (Array.isArray(a.observations) ? a.observations : []).entries()) {
+      const w = `findings.observations[${i}]`;
+      if (!nonEmpty(observation?.title) || !nonEmpty(observation?.detail)) problems.push(`${w} 需要 title 和 detail（事实及影响）`);
+      problems.push(...pointerProblems(w, observation?.pointers, true));
+    }
   }
   const items = a.items ?? [];
   const checks = a.checks ?? [];
@@ -607,13 +596,20 @@ export function validateFindings(a) {
         "问题只分两类（true_bug / needs_decision），确定是 bug 的写 how_verified / repro / expected，" +
         "要人定的写 decision / ask / context；判题不说怎么修、不说改哪里");
     }
+    if (it.issue_type !== undefined && !ISSUE_TYPES.includes(it.issue_type)) problems.push(`${w}.issue_type 只能是 tool / skill / case`);
+    if (a.scope === "current") {
+      if (!ISSUE_TYPES.includes(it.issue_type)) problems.push(`${w}.issue_type 必填`);
+      if (it.class === "true_bug" && it.issue_type !== "tool") problems.push(`${w}：true_bug 只用于已核实的工具或相关数据链路缺陷`);
+      if (it.issue_type === "skill" && it.decision !== "wording") problems.push(`${w}：skill 问题应说明 wording 决定`);
+      if (it.issue_type === "case" && it.decision !== "case") problems.push(`${w}：case 问题应说明 case 决定`);
+    }
     if (it.class === "true_bug") {
       // 判定链、重放、修好后该看到什么——三样是**下游不必再核一遍**的最小集合。
       // 缺 how_verified 就退化成「我觉得它错了」；缺 repro 这一条永远关不掉（关单判据就是重放变对）。
       if (!nonEmpty(it.how_verified)) {
-        problems.push(`${w}.how_verified 缺失（确定是 bug 必填：看到什么 / 原样重放得到什么 / 从别的路拿到什么 / 所以 dbdog 在哪一步给错了）`);
+        problems.push(`${w}.how_verified 缺失（确定是 bug 必填：实际偏差 / 核实结果 / 预期依据 / 为什么不是正常条件差异）`);
       }
-      if (!nonEmpty(it.repro)) problems.push(`${w}.repro 缺失（确定是 bug 必填：一条能跑的调用，工具名 + 入参 + 期望 vs 实际——关它的判据就是重放变对）`);
+      if (!nonEmpty(it.repro)) problems.push(`${w}.repro 缺失（确定是 bug 必填：文字说明条件、工具或操作、关键入参、实际表现；不要求脚本）`);
       if (!nonEmpty(it.expected)) problems.push(`${w}.expected 缺失（确定是 bug 必填：修好之后重放该看到什么，不是「去哪儿改」）`);
     }
     if (it.class === "needs_decision") {
@@ -659,7 +655,7 @@ export function validateFindings(a) {
 }
 
 /**
- * 这一条批注里的**弃判** = `decision: is_bug` 的条目：三条取证路都走了，仍分不开「丢了」和「本来就没有」。
+ * 这一条批注里的**弃判** = `decision: is_bug` 的条目：已做必要取证，仍分不开「丢了」和「本来就没有」。
  *
  * 单独算是因为弃判与「挖到一个问题」不是一回事（Autorubric 的 `CANNOT_ASSESS`、以及 rubric 判题
  * 一致性测量的惯例：弃判率要与一致率分开报）。混在产量里看，会让「这轮挖到几条确定的 bug」
@@ -709,6 +705,7 @@ export function deriveVerdictFromRoots(roots) {
 export function validateAgainstCase(labels, ctx = {}) {
   const problems = [];
   const f = labels?.findings;
+  if (ctx.scope === "current" && f?.scope !== "current") problems.push("本包只判当前诊断，findings.scope 必须是 current");
   const roots = (f && typeof f === "object" && !Array.isArray(f)) ? f.roots : undefined;
   const expected = ctx.expectedRoots;
 
@@ -719,6 +716,9 @@ export function validateAgainstCase(labels, ctx = {}) {
         problems.push(`这道题没有答案纸，verdict 只能是 unknown（现在是 ${JSON.stringify(labels.verdict)}）——没有答案纸就没有「对」这个判断`);
       }
       if (roots !== undefined) problems.push("这道题没有答案纸，findings.roots 不该有值——先回建用例那一步补根因");
+    } else if (f?.scope === "current" && labels?.verdict === "unknown") {
+      if (!Array.isArray(f.limitations) || !f.limitations.length) problems.push("有答案纸但无法判根因，必须说明 limitations");
+      if (roots !== undefined) problems.push("verdict=unknown 不填写 roots，不把未判强行记为未命中");
     } else if (labels?.verdict === "not_reproduced") {
       // 现场不成立：现象根本没出来，「agent 找没找到根因」这件事本身就不成立，不要求划集合。
       // 也不拿集合去核 verdict——这一档的下一步是回复现那一侧重跑，不是算分。
@@ -764,7 +764,7 @@ export function validateAgainstCase(labels, ctx = {}) {
   const spanIds = Array.isArray(ctx.spanIds) ? ctx.spanIds.filter(Boolean).map(String) : [];
   if (spanIds.length) {
     const { items, checks } = normalizeFindings(f);
-    for (const [where, list] of [["items", items], ["checks", checks]]) {
+    for (const [where, list] of [["items", items], ["checks", checks], ["observations", Array.isArray(f?.observations) ? f.observations : []]]) {
       list.forEach((entry, i) => {
         for (const pt of Array.isArray(entry?.pointers) ? entry.pointers : []) {
           const id = typeof pt?.span_id === "string" ? pt.span_id.trim() : "";
@@ -778,6 +778,12 @@ export function validateAgainstCase(labels, ctx = {}) {
     }
   }
   return problems;
+}
+
+/** 当前类型聚合只依赖本次 items；历史 kind 可保留类型，缺失不猜。 */
+export function deriveFindingTypes(findings) {
+  const types = new Set((normalizeFindings(findings).items).map(issueTypeOf).filter(Boolean));
+  return ISSUE_TYPES.filter((type) => types.has(type));
 }
 
 /**
@@ -823,11 +829,12 @@ function fromLegacyItem(it) {
   const { kind, qualifier, verified, rule_ref: ruleRef, suspected_kind: suspectedKind, suggestion, layer, fix_where: fixWhere, evidence, expected, ...rest } = it;
   if (mapped.class === "true_bug") {
     // 旧 `evidence` 就是判定链那段话；旧 `expected` 与新的同义，原样留。
-    return { ...rest, class: "true_bug", how_verified: joinParts(evidence), ...(expected === undefined ? {} : { expected }), legacy: true };
+    return { ...rest, ...(issueTypeOf(it) ? { issue_type: issueTypeOf(it) } : {}), class: "true_bug", how_verified: joinParts(evidence), ...(expected === undefined ? {} : { expected }), legacy: true };
   }
   // 要人定这一侧：旧的三段（证据 / 修好该看到什么 / 建议）合起来才是「全部上下文」。
   return {
     ...rest,
+    ...(issueTypeOf(it) ? { issue_type: issueTypeOf(it) } : {}),
     class: "needs_decision",
     decision: mapped.decision,
     context: joinParts(evidence, expected, suggestion, ruleRef && `规矩写在：${ruleRef}`),
@@ -1024,9 +1031,17 @@ export function validateLabels(labels) {
   if (labels.summary !== undefined && typeof labels.summary === "string" && labels.summary.length > 600) {
     problems.push(`summary 太长（${labels.summary.length} 字，上限 600）——总评三句以内，细节写进各条问题`);
   }
-  for (const k of ["finding_kinds", "fix_marks", "rubric_version"]) {
+  if (labels.findings?.scope === "current") {
+    for (const label of ["verdict", "evidence", "findings", "summary"]) {
+      if (labels[label] === undefined) problems.push(`单次判题缺少 ${label}`);
+    }
+    if ((labels.verdict === "unknown" || labels.evidence === "unknown") && !labels.findings.limitations?.length) {
+      problems.push("无法判断时必须在 findings.limitations 说明缺什么及影响");
+    }
+  }
+  for (const k of ["finding_kinds", "finding_types", "fix_marks", "rubric_version"]) {
     if (labels[k] !== undefined) {
-      problems.push(`${k} 不由判题方写（finding_kinds 由 import 从 findings 算出；fix_marks 由 fix-mark.mjs 写；` +
+      problems.push(`${k} 不由判题方写（finding_kinds / finding_types 由 import 从 findings 算出；fix_marks 由 fix-mark.mjs 写；` +
         `rubric_version 由 import 从包里记的那份写——判官自己填多半会填错自己跑的是哪一版）`);
     }
   }
@@ -1051,7 +1066,7 @@ export function validateLabels(labels) {
  * 「判官变了」还是「口径变了」，而 `annotator` 当初存在的理由正是要把这两件事分开。
  */
 export function annotationPayload({ interactionId, labels, labelIds, annotator, rubricVersion }) {
-  const withKinds = labels.findings !== undefined ? { ...labels, finding_kinds: deriveFindingKinds(labels.findings) } : labels;
+  const withKinds = labels.findings !== undefined ? { ...labels, finding_kinds: deriveFindingKinds(labels.findings), ...(labelIds.finding_types ? { finding_types: deriveFindingTypes(labels.findings) } : {}) } : labels;
   // 老包的 manifest 里没有这一格：不写，也不编一个——一个猜出来的版本号比没有更坏。
   const withRubric = rubricVersion ? { ...withKinds, rubric_version: String(rubricVersion) } : withKinds;
   const out = [];
