@@ -59,6 +59,13 @@ function valid(e) {
     default: return false;
   }
 }
+export function eventProblem(e) {
+  if (!isId(e?.id)) return "event.id must be a unique nonempty identifier";
+  if (e.event === "evidence" && (!Array.isArray(e.sources) || !e.sources.length)) return "evidence.sources is missing: copy actual E: references and exact output quotes; never invent them";
+  if (Array.isArray(e.sources) && e.sources.some(s => !sourceValid(s))) return "sources require ref (actual E: reference) and quote (exact returned text); location alone is not a hook reference";
+  if (e.event === "check" && !["locate", "test"].includes(e.mode)) return "check.mode must be locate or test";
+  return `Invalid ${e.event ?? "unknown"} event: inspect its required fields in investigation-recording`;
+}
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])]));
@@ -77,7 +84,7 @@ export function extractInvestigationEvents(spans) {
       try { parsed = JSON.parse(block[1]); }
       catch { diagnostics.push({ code: "invalid_event_json", span_id: span.span_id }); continue; }
       for (const e of Array.isArray(parsed) ? parsed : [parsed]) {
-        if (!valid(e)) { diagnostics.push({ code: "invalid_event", span_id: span.span_id, event_id: typeof e?.id === "string" ? e.id : null }); continue; }
+        if (!valid(e)) { diagnostics.push({ code: "invalid_event", span_id: span.span_id, event_id: typeof e?.id === "string" ? e.id : null, rejected: e, problem: eventProblem(e) }); continue; }
         const signature = JSON.stringify(canonical(e));
         if (seen.has(e.id)) {
           if (seen.get(e.id) !== signature) diagnostics.push({ code: "event_id_conflict", event_id: e.id, span_id: span.span_id });

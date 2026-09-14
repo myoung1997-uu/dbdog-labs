@@ -1,3 +1,4 @@
+import { spanForUpload } from "../../../../../claude-code-hooks/lib.mjs";
 // exp-client.mjs — llmobs runner 的 dbdog-server REST 客户端（eval 面 E2）。
 // 鉴权两种，**优先用户面**（2026-09-11：飞轮要能给拿不到内部凭证的普通用户跑）：
 //   - `DBDOG_API_KEY` → `DD-API-KEY` 头。控制台 /settings/api-keys 签发，与 hooks 上报 span 同一把；
@@ -269,7 +270,7 @@ export function spansSink(env = process.env) {
 
 export async function postSpans(spans, { fetchImpl = fetch, sink = spansSink() } = {}) {
   for (let i = 0; i < spans.length; i += 200) {
-    const batch = { spans: spans.slice(i, i + 200) };
+    const batch = { spans: spans.slice(i, i + 200).map(spanForUpload) };
     if (sink.kind === "server") {
       await call("POST", "/api/v2/llmobs/spans", batch);
       continue;
