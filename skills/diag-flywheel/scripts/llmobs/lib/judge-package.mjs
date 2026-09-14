@@ -75,7 +75,7 @@ export const FIX_MARK_STATUSES = ["claimed_fixed", "needs_human", "wont_fix"];
  * · `repaired`     数据错了，按确定的规则改回来了；
  * · `unrepairable` 修不回来（比如当时就没采到）——原窗口里没有对的数据，复测不了，只能等重跑。
  *
- * 为什么要记：它决定修完之后**能不能在原窗口复测**，也决定页面建议点哪几个按钮（§15.4）——
+ * 为什么要记：它决定修完之后**能不能在原窗口复测**，也决定页面建议点哪一个按钮（§15.4）——
  * 修不回来的要新造现场，旧窗口再诊断一百遍查到的也还是错的数据。
  */
 export const FIX_MARK_DATA = ["unaffected", "repaired", "unrepairable"];
