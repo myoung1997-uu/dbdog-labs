@@ -44,6 +44,10 @@ const read = (rel) => {
 const manifestRaw = read("manifest.json");
 if (!manifestRaw) fail(`${path.join(PKG, "manifest.json")} 不存在——这不是一个判题包`);
 const manifest = JSON.parse(manifestRaw);
+if (manifest.judgement_scope === "current" && fs.existsSync(path.join(PKG, "reverse-chain-revisions")) &&
+    fs.readdirSync(path.join(PKG, "reverse-chain-revisions")).some((name) => /\.(json|md)$/.test(name))) {
+  fail("单次判题不修订反向链：请移走 reverse-chain-revisions，交由用例维护流程处理；本次未写入");
+}
 const labelIds = Object.fromEntries((manifest.label_schema ?? []).map((l) => [l.label, l.id]));
 // manifest.experiment：P3 起是 `{id,name}`（id = 控制面 uuid，总账直接 PATCH 它）；
 // 更早导出的包里是一个自由串，按名解析一次（同 --parent 的规则）。
@@ -84,7 +88,10 @@ if (!jsonl) {
   const caseProblems = [];
   for (const r of rows) {
     const c = caseByTrace.get(r.trace_id);
-    if (!c) continue;
+    if (!c) {
+      if (manifest.judgement_scope === "current") caseProblems.push(`trace ${r.trace_id} 不属于本判题包`);
+      continue;
+    }
     const tracePath = path.join(PKG, "cases", String(c.event_id), "trace.json");
     let spanIds;
     try {
@@ -92,6 +99,7 @@ if (!jsonl) {
       spanIds = (t?.spans ?? []).map((sp) => sp?.span_id).filter(Boolean).map(String);
     } catch { /* 没带 trace.json：这一项不查 */ }
     const ps = validateAgainstCase(r.labels, {
+      scope: manifest.judgement_scope,
       ...(Array.isArray(c.expected_roots) ? { expectedRoots: c.expected_roots } : {}),
       ...(spanIds?.length ? { spanIds } : {}),
     });
