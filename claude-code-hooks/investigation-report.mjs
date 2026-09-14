@@ -245,7 +245,9 @@ function mountReport() {
   let step = 0;
   for (const s of inv.views.investigation_steps) {
     const d = s.detail;
-    const summary = d.purpose ?? d.summary ?? d.claim ?? d.conclusion ?? d.wanted ?? d.reason ?? d.question ?? '';
+    const summary = s.event === 'branch' ? targetTitle(d.hypothesis, s.id)
+      : s.event === 'update' ? `${targetTitle(d.hypothesis ?? d.relation, s.id, d.hypothesis ? 'hypothesis' : 'relation')} · ${labels[d.state]}`
+      : d.purpose ?? d.summary ?? d.claim ?? d.conclusion ?? d.wanted ?? d.reason ?? d.question ?? '';
     const body = fold($('#steps'), `${++step}. ${eventNames[s.event] ?? '调查记录'} · ${summary}`);
     body.parentElement.classList.add('step');
     if (s.event === 'checkpoint') showCheckpoint(body, d);
