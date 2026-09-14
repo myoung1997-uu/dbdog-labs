@@ -281,7 +281,7 @@ mcp 不双写、不上报，跟没装一样）：
 
 ## 结构化调查记录
 
-服务端 `dbdog/investigation-recording` 定义模型事件协议；本地 `investigation-events.mjs` 解析它。
+服务端 当前引擎的 `dbdog/dbm-<engine>/investigation-recording` 定义模型事件协议；本地 `investigation-events.mjs` 解析它。
 `PostToolUse` / `PostToolUseFailure` 用实际调用 ID 返回证据引用，只补充上下文，不修改工具结果或权限。
 插件注册与手工 settings 片段均包含该 hook。需使用含此改动的插件/脚本版本，新会话才能取得引用。
 执行前被拒的调用可能不触发结果 hook；这时只记录实际缺口，不伪造引用。
@@ -307,7 +307,7 @@ JSON 与本地 Markdown 保留完整语义；旧控制台通过兼容节点/调�
 
 ### 调查阶段结果与验证边界
 
-当前引擎的 investigate 定义专业结果接纳与整体调查决策，`dbdog/investigation-recording` 定义模型事件格式。
+当前引擎的 investigate 定义专业结果接纳与整体调查决策，当前引擎的 `dbdog/dbm-<engine>/investigation-recording` 定义模型事件格式。
 checkpoint 保存当前问题、范围、阶段发现、未解问题与下一动作；记录不要求为定位建立假设。
 工具执行事实自动保留，模型为影响解释或路线的缺口补充语义。
 `reference_check` 为 matched / incomplete / not_provided；旧 `evidence_complete` 仅作布尔兼容。

@@ -5,7 +5,7 @@ description: 从 dbdog hook 的明确调查记录生成假设视图与调查步�
 
 # 从记录还原调查
 
-本能力负责重建与交付视图。调查推进由当前引擎的托管 investigate skill 定义，事件格式由 `dbdog/investigation-recording` 定义；本 skill 不另立假设协议、不宣布根因。
+本能力负责重建与交付视图。调查推进由当前引擎的托管 investigate skill 定义，事件格式由 当前引擎的 `dbdog/dbm-<engine>/investigation-recording` 定义；本 skill 不另立假设协议、不宣布根因。
 
 ## 选择记录
 

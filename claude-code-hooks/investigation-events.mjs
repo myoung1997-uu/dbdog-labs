@@ -51,7 +51,7 @@ function valid(e) {
       ["empty", "error", "capability_unavailable", "outside_retention", "inaccessible", "inconclusive"].includes(e.result) &&
       (e.check === undefined || isId(e.check)) && optionalList(e.sources, sourceValid) &&
       optionalList(e.hypotheses, isHypothesis) && optionalList(e.relations, isId);
-    case "finish": return ["answered", "evidence_boundary", "interrupted"].includes(e.outcome) &&
+    case "finish": return ["answered", "evidence_boundary"].includes(e.outcome) &&
       isText(e.reason) && isText(e.conclusion) && listOf(e.evidence, isId) &&
       optionalList(e.answer_hypotheses, isHypothesis) && optionalList(e.answer_relations, isId) &&
       listOf(e.unresolved, unresolvedValid) &&
