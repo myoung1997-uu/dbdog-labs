@@ -73,3 +73,33 @@ describe('actual Stop hook repair boundary',()=>{
   } finally {fs.rmSync(dir,{recursive:true,force:true});}
  });
 });
+
+describe('reference correction in the investigation loop',()=>{
+ it('reports paraphrased quotes before Stop and explains immutable observation repair',()=>{
+  const bad={...obs,sources:[{ref:'E:t1',quote:'A ... B'}]};
+  const inv=buildInvestigation([tool,msg([cp,h,branch,bad])]);
+  expect(investigationIssues(inv).join('\n')).toContain('NEW observation ID');
+  const fixed={...obs,id:'o2',observation:'O2'};
+  const spans=[tool,msg([cp,h,branch,bad,update]),msg([fixed,{...update,id:'u2',evidence:['O2']},{...finish,id:'f2',evidence:['O2']}],'m2')];
+  expect(deliveryFeedback(spans,report).state.status).toBe('complete');
+  expect(buildInvestigation(spans).observations).toHaveLength(2);
+ });
+ it('surfaces unreadable JSON immediately and does not permanently block later complete records',()=>{
+  const broken={...msg([],'broken'),output:'```dbdog-investigation\n[{"event":"hypothesis" broken}]\n```'};
+  expect(investigationIssues(buildInvestigation([broken])).join('\n')).toContain('none of its records were accepted');
+  expect(deliveryFeedback([tool,broken,msg([cp,h,branch,obs,update,finish])],report).state.status).toBe('complete');
+ });
+ it('requires the actual check linked by evidence in the final judgment',()=>{
+  const spans=[tool,msg([cp,h,branch,{...obs,check:'C-missing'},update,finish])];
+  expect(deliveryFeedback(spans,report).output.reason).toContain('referenced check C-missing is undeclared');
+ });
+});
+
+it('a missing database plan does not waive mismatched quotes on existing observations',()=>{
+ const gap={event:'gap',id:'g',gap:'D1',hypotheses:['H1'],wanted:'Actual query plan',attempt:'Looked for incident plan',result:'empty',impact:'Dominant operator remains unknown'};
+ const bad={...obs,sources:[{ref:'E:t1',quote:'A ... B'}]};
+ const spans=[tool,msg([cp,h,branch,bad,gap,update,{...finish,outcome:'evidence_boundary'}])];
+ const result=deliveryFeedback(spans,report);
+ expect(result.state.status).toBe('incomplete');
+ expect(result.output.reason).toContain('database evidence gap does not validate');
+});
