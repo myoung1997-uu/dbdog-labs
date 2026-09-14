@@ -307,7 +307,7 @@ JSON 与本地 Markdown 保留完整语义；旧控制台通过兼容节点/调�
 
 ### 调查阶段结果与验证边界
 
-`dbdog/investigate` 定义专业取证交付与整体调查决策，`dbdog/investigation-recording` 定义模型事件格式。
+当前引擎的 investigate 定义专业结果接纳与整体调查决策，`dbdog/investigation-recording` 定义模型事件格式。
 checkpoint 保存当前问题、范围、阶段发现、未解问题与下一动作；记录不要求为定位建立假设。
 工具执行事实自动保留，模型为影响解释或路线的缺口补充语义。
 `reference_check` 为 matched / incomplete / not_provided；旧 `evidence_complete` 仅作布尔兼容。

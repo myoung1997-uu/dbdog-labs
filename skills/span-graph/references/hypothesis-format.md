@@ -1,6 +1,6 @@
 # 调查记录协议与历史兼容
 
-当前模型协议单源为 MCP 托管 `dbdog/investigation-recording`。主方法是 `dbdog/investigate`。使用可用的 skill 读取接口加载它们；没有托管连接时，以本地实际事件和解析诊断为准，不虚构规范或证据。
+当前模型协议单源为 MCP 托管 `dbdog/investigation-recording`。调查方法由当前引擎的 investigate skill 定义。使用可用的 skill 读取接口加载当前所需定义；没有托管连接时，以本地实际事件和解析诊断为准，不虚构规范或证据。
 
 新记录使用 assistant 的 dbdog-investigation JSON 事件。checkpoint 记录问题与阶段结果；hypothesis/revise 保存主张历史；branch 明确追问父关系；relation 保存需独立取证的因果与条件关系；check/evidence/update/gap/finish 记录检查、观察解释、判断、缺口和结束。
 
