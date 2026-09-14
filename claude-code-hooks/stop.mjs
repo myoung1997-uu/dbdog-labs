@@ -39,8 +39,11 @@ import {
   deriveSpanId,
   pendingIds,
   rootSpanTags,
+  scanSpans,
 } from "./lib.mjs";
 import { PENDING_TOOL_USE_MAX, msBetween, readNewLines, synthesize } from "./synthesize.mjs";
+import { deliveryFeedback } from "./investigation-delivery.mjs";
+import { dedupe } from "./hypothesis-graph.mjs";
 import { summaryEnv } from "./summary.mjs";
 
 /** 诊断流程总结 detached worker（与 stop.mjs 同目录）。 */
@@ -201,6 +204,16 @@ async function handleMain(input, state) {
   // 本轮新增的工具调用数（= 诊断有新进展的信号；纯 Q&A 回合无新工具，不触发总结重算）。
   const newToolCount = spans.filter((s) => s.kind === "tool").length;
 
+  const history = [];
+  await scanSpans(s => { if (s.trace_id === state.trace_id) history.push(s); });
+  const finalText = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
+  const finalRecord = { trace_id: state.trace_id, span_id: "delivery-final", parent_id: state.root_span_id,
+    kind: "llm", ts: new Date().toISOString(), output: finalText };
+  const waiting = (input.background_tasks ?? []).some(t => ["running", "pending"].includes(t.status));
+  const delivery = waiting ? { state: state.investigation_delivery ?? {}, output: null }
+    : deliveryFeedback(dedupe([...history, ...spans, finalRecord]), finalText, state.investigation_delivery);
+  if (delivery.state.status) state.investigation_delivery = delivery.state;
+
   // root agent span：同 span_id 重发，后写赢。
   spans.push({
     trace_id: state.trace_id,
@@ -232,6 +245,8 @@ async function handleMain(input, state) {
     [...pendingToolUses.entries()].slice(-PENDING_TOOL_USE_MAX),
   );
   writeState(input.session_id, state);
+
+  if (delivery.output) process.stdout.write(JSON.stringify(delivery.output) + "\n");
 
   // 诊断流程总结：本轮有新工具调用、且配了本地大模型 → 后台 detach 起 worker 生成总结。
   // 不 await、不阻塞 Stop（用户零等待）；worker 读 spans.jsonl 真相源、按固定 span_id 后写赢。

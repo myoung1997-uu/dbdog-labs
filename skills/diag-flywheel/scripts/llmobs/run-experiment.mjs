@@ -283,6 +283,11 @@ async function runOne(record, idx, ctx) {
       const state = JSON.parse(fs.readFileSync(path.join(ctx.obsDir, `${run.sessionId}.json`), "utf8"));
       traceId = state.trace_id ?? "";
       rootSpanId = state.root_span_id ?? "";
+      if (state.investigation_delivery?.status === "incomplete") {
+        run.failure = `investigation delivery incomplete: ${(state.investigation_delivery.issues ?? []).join("; ")}`;
+        run.partialProse = run.prose;
+        console.error(`✗ [${label}] ${run.failure}`);
+      }
     } catch { /* hooks 未生效 → 无 trace（照实上报空 trace_id） */ }
   }
   // 没 trace 的诊断不许当成功：event 照实上报（trace_id 空），但计入失败、整轮退出码非零——

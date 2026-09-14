@@ -77,6 +77,7 @@ export function rootSpanTags(state) {
   return {
     trace_source: "client",
     hooks_version: hooksVersion(),
+    ...(state.investigation_delivery?.status ? { investigation_delivery: state.investigation_delivery.status } : {}),
     ...(state.ml_app ? { ml_app: state.ml_app } : {}),
   };
 }

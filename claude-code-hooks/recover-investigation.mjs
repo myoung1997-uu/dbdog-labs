@@ -7,7 +7,7 @@ import { obsDir, readState, scanSpans } from "./lib.mjs";
 import { readNewLines, synthesize } from "./synthesize.mjs";
 import { build, dedupe, writeGraph } from "./hypothesis-graph.mjs";
 
-export async function recoverInvestigation(sessionId, transcriptPath) {
+export async function investigationSnapshot(sessionId, transcriptPath) {
   const state = readState(sessionId);
   if (!state?.trace_id || state.active === false) throw new Error("No active recorded investigation for this session");
   if (state.transcript_path && transcriptPath && path.resolve(state.transcript_path) !== path.resolve(transcriptPath))
@@ -25,9 +25,20 @@ export async function recoverInvestigation(sessionId, transcriptPath) {
   }
   const merged = dedupe(spans);
   if (!merged.length) throw new Error("No persisted investigation records are available yet");
-  const graph = build(merged);
+  return { state, spans: merged, graph: build(merged) };
+}
+
+export async function recoverInvestigation(sessionId, transcriptPath) {
+  const { state, spans: merged, graph } = await investigationSnapshot(sessionId, transcriptPath);
   const out = path.join(obsDir(), "investigations", state.trace_id);
   const files = writeGraph(merged, out, { trace: state.trace_id, session: sessionId, recovery: true });
+  // A model repairing a missing E: link needs the actual result identities and
+  // text, not only a graph whose unlinked observations were rejected.
+  files.evidence_spans = path.join(out, "evidence-spans.jsonl");
+  fs.writeFileSync(files.evidence_spans, merged.filter(s => s.kind === "tool").map(s => JSON.stringify({
+    ref: `E:${s.span_id}`, span_id: s.span_id, tool: s.name, ts: s.ts,
+    input: s.input_local ?? s.input, output: s.output_local ?? s.output,
+  })).join("\n") + "\n", { mode: 0o600 });
   return { trace_id: state.trace_id, state: graph.investigation?.state ?? "unrecorded",
     checkpoint: graph.investigation?.checkpoints.at(-1) ?? null,
     hypotheses: graph.investigation?.views?.hypothesis_view ?? null,
