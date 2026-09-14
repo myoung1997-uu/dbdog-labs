@@ -94,3 +94,12 @@ describe('reference correction in the investigation loop',()=>{
   expect(deliveryFeedback(spans,report).output.reason).toContain('referenced check C-missing is undeclared');
  });
 });
+
+it('a missing database plan does not waive mismatched quotes on existing observations',()=>{
+ const gap={event:'gap',id:'g',gap:'D1',hypotheses:['H1'],wanted:'Actual query plan',attempt:'Looked for incident plan',result:'empty',impact:'Dominant operator remains unknown'};
+ const bad={...obs,sources:[{ref:'E:t1',quote:'A ... B'}]};
+ const spans=[tool,msg([cp,h,branch,bad,gap,update,{...finish,outcome:'evidence_boundary'}])];
+ const result=deliveryFeedback(spans,report);
+ expect(result.state.status).toBe('incomplete');
+ expect(result.output.reason).toContain('database evidence gap does not validate');
+});

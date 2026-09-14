@@ -56,16 +56,20 @@ export function investigationIssues(inv, { final = false, report = "" } = {}) {
     for (const id of decision.evidence) {
       const o = os.get(id);
       if (!o) add(`${h.id}: missing observation ${id}`);
-      else if ((!o.sources.length || o.sources.some(s => !s.matched)) && !boundary) add(`${h.id}/${id}: source linkage is unverified; repair from the actual result or record a scoped gap`);
+      else if ((!o.sources.length || o.sources.some(s => !s.matched))) add(`${h.id}/${id}: source linkage is unverified; use a new observation with exact original quotes, then update the judgment; a database evidence gap does not validate this citation`);
       if (o?.check && !inv.checks.some(c => c.id === o.check)) add(`${h.id}/${id}: referenced check ${o.check} is undeclared; record the actual check or use a corrected observation with the right association`);
     }
-    if (decision.reference_check === "incomplete" && !boundary) add(`${h.id}: latest judgment has incomplete references or interpretations; re-link evidence to the current claim and emit a new update`);
+    if (decision.reference_check === "incomplete") add(`${h.id}: latest judgment has incomplete references or interpretations; re-link evidence to the current claim and emit a new update`);
   }
   if (finish) {
     if (!Array.isArray(finish.answer_hypotheses) || !Array.isArray(finish.answer_relations)) add("finish: explicitly list answer_hypotheses and answer_relations (empty only where not used)");
     for (const id of finish.answer_hypotheses ?? []) if (!hs.has(id)) add(`${id}: finish references an undeclared hypothesis`);
     for (const id of finish.answer_relations ?? []) if (!rs.has(id)) add(`${id}: finish references an undeclared relation`);
-    for (const id of finish.evidence) if (!os.has(id)) add(`${id}: finish references a missing observation`);
+    for (const id of finish.evidence) {
+      const o = os.get(id);
+      if (!o) add(`${id}: finish references a missing observation`);
+      else if (!o.sources.length || o.sources.some(s => !s.matched)) add(`${id}: finish cites an unverified original quote; a scoped evidence boundary does not repair this record`);
+    }
   }
   for (const title of missingReportSections(report)) add(`report: missing or empty "## ${title}"`);
   return issues;
