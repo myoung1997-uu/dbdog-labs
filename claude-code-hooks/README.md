@@ -313,3 +313,11 @@ checkpoint 保存当前问题、范围、阶段发现、未解问题与下一动
 `reference_check` 为 matched / incomplete / not_provided；旧 `evidence_complete` 仅作布尔兼容。
 校验引用身份、原文和先后依赖；修订后的主张不能直接沿用旧解释，关系端点修订也会使旧关系解释过期。
 这些检查不证明因果真伪、样本代表性或答案充分性。无引用能力可继续用实际可访问的证据调查，不能伪造 E 引用。
+
+### 假设路径、步骤与恢复
+
+追问 branch 与因果 relation 分开记录；主树顶部使用 checkpoint 的问题，缺失父关系或追问环显示记录诊断。
+显式记录同时生成 `hypothesis-view.json` 与 `investigation-steps.json`；构建不使用模型推断关系。旧 intent 只供历史兼容。
+调用 `node claude-code-hooks/recover-investigation.mjs <实际session_id> <实际主transcript路径>` 可恢复进行中的调查。
+脚本只读 span 与主 transcript 游标后的完整行，写视图快照；不改变 hook 游标、不发网络请求或重查数据库。
+输入可从 PostToolUse 返回的 recovery 信息取得。尚未落盘的子代理尾部可能缺失，恢复结果明确给出覆盖边界。

@@ -1,3 +1,4 @@
+import { investigationViews } from "./investigation-views.mjs";
 // 模型声明调查语义，hook span 提供实际结果身份。只读取 assistant 显式事件。
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const HYPOTHESIS = /^H\d+(?:\.\d+)*$/;
@@ -27,6 +28,9 @@ const relationValid = e => isHypothesis(e.to) && (
 function valid(e) {
   if (!e || typeof e !== "object" || !isId(e.id)) return false;
   switch (e.event) {
+    case "branch": return isHypothesis(e.hypothesis) && isText(e.reason) &&
+      listOf(e.parents, p => p === "question" || isHypothesis(p)) && e.parents.length > 0 &&
+      new Set(e.parents).size === e.parents.length && !e.parents.includes(e.hypothesis);
     case "checkpoint": return isText(e.question) && isText(e.scope) &&
       listOf(e.findings, f => f && isText(f.summary) && listOf(f.evidence, isId)) &&
       listOf(e.unresolved, unresolvedValid) && e.next && isText(e.next.action) && isText(e.next.reason);
@@ -49,6 +53,7 @@ function valid(e) {
       optionalList(e.hypotheses, isHypothesis) && optionalList(e.relations, isId);
     case "finish": return ["answered", "evidence_boundary", "interrupted"].includes(e.outcome) &&
       isText(e.reason) && isText(e.conclusion) && listOf(e.evidence, isId) &&
+      optionalList(e.answer_hypotheses, isHypothesis) && optionalList(e.answer_relations, isId) &&
       listOf(e.unresolved, unresolvedValid) &&
       (e.outcome !== "evidence_boundary" || e.unresolved.length > 0);
     default: return false;
@@ -93,13 +98,13 @@ export function buildInvestigation(spans) {
   const { events, diagnostics } = extractInvestigationEvents(spans);
   if (!events.length && !diagnostics.length) return null;
   const traceIds = new Set(spans.map(s => s.trace_id).filter(Boolean));
-  const empty = { version: 1, events, state: "active", checkpoints: [], hypotheses: [], relations: [], checks: [], observations: [], gaps: [], finishes: [], edges: [] };
+  const empty = { version: 1, events, state: "active", branches: [], checkpoints: [], hypotheses: [], relations: [], checks: [], observations: [], gaps: [], finishes: [], edges: [] };
   if (traceIds.size !== 1) return { ...empty, diagnostics: [...diagnostics, { code: "ambiguous_trace_scope" }] };
   const traceId = [...traceIds][0];
   const tools = new Map(spans.filter(s => s.kind === "tool" && s.trace_id === traceId).map(s => [`E:${s.span_id}`, s]));
   const hypotheses = new Map(), relations = new Map(), checks = new Map(), observations = new Map(), gaps = new Map(), edges = [], finishes = [];
   let state = "active";
-  const checkpoints = [];
+  const checkpoints = [], branches = [];
   const position = new Map(spans.map((s, i) => [s.span_id, i]));
   const note = (code, e, details = {}) => diagnostics.push({ code, event_id: e.id, span_id: e.span_id, ...details });
   const resolveSources = (sources, e) => sources.map(ref => {
@@ -152,7 +157,8 @@ export function buildInvestigation(spans) {
   };
   for (const e of events) {
     if (e.event !== "finish") state = "active";
-    if (e.event === "checkpoint") {
+    if (e.event === "branch") branches.push(e);
+    else if (e.event === "checkpoint") {
       checkpoints.push({ ...e, findings: e.findings.map(f => ({ ...f,
         reference_check: referenceCheck(f.evidence, e) })) });
     } else if (e.event === "hypothesis") {
@@ -199,6 +205,14 @@ export function buildInvestigation(spans) {
       if (gaps.has(e.gap)) { note("duplicate_gap", e, { gap: e.gap }); continue; }
       gaps.set(e.gap, { ...e, id: e.gap, event_id: e.id, sources: resolveSources(e.sources ?? [], e), status_source: "model_declared" });
     } else if (e.event === "finish") {
+      for (const [ids, targets, kind] of [[e.answer_hypotheses ?? [], hypotheses, "hypothesis"], [e.answer_relations ?? [], relations, "relation"]]) {
+        for (const id of ids) {
+          const target = targets.get(id);
+          if (!target) note("unknown_answer_claim", e, { target: id, kind });
+          else if (target.history.length && target.history.at(-1).claim_event_id !== claimRevision(target))
+            note("finish_stale_assessment", e, { target: id, kind });
+        }
+      }
       const checked = referenceCheck(e.evidence, e);
       finishes.push({ ...e, checkpoint: checkpoints.at(-1)?.id ?? null, reference_check: checked,
         evidence_complete: checked === "matched", status_source: "model_declared" });
@@ -230,8 +244,12 @@ export function buildInvestigation(spans) {
     if (observations.has(id)) linkedEdges.push({ kind: "basis", from: id, to: h.id, event_id: h.event_id, span_id: h.proposed_in });
     else diagnostics.push({ code: "missing_observation", event_id: h.event_id, observation: id });
   }
-  return { version: 1, trace_id: traceId, events, state, checkpoints, hypotheses: [...hypotheses.values()], relations: [...relations.values()],
+  const result = { version: 1, trace_id: traceId, events, state, branches, checkpoints, hypotheses: [...hypotheses.values()], relations: [...relations.values()],
     checks: [...checks.values()], observations: [...observations.values()], gaps: [...gaps.values()], finishes, edges: linkedEdges, diagnostics };
+  const views = investigationViews(result);
+  result.diagnostics.push(...views.diagnostics);
+  result.views = { hypothesis_view: views.hypothesis_view, investigation_steps: views.investigation_steps };
+  return result;
 }
 
 /** 老消费者仍能看到节点与取证；完整多对多关系和状态历史以 investigation 为准。 */
@@ -281,16 +299,12 @@ export function projectInvestigation(graph, spans) {
     if (last) graph.edges.push({ kind: "resolve", from: last.reason, to: h.id, verdict: node.verdict, span_id: last.span_id });
     nodes.set(h.id, node);
   }
-  // 单父投影只在恰有一条 explains 时出现。多父与其他关系完整保存在事件图，不选择任意父。
+  // 旧树只投影显式追问边；因果 explains 不能反向制造调查父子关系。
   for (const h of inv.hypotheses) {
-    const parents = inv.edges.filter(e => e.kind === "relation" && e.type === "explains" && e.from === h.id);
-    if (parents.length === 1 && nodes.has(parents[0].to)) {
-      let cursor = parents[0].to;
-      const seen = new Set([h.id]);
-      while (cursor && !seen.has(cursor)) { seen.add(cursor); cursor = nodes.get(cursor)?.parent; }
-      if (cursor) continue; // 完整图保留显式环；旧单父树投影不能形成环。
-      nodes.get(h.id).parent = parents[0].to;
-      graph.edges.push({ kind: "parent", from: parents[0].to, to: h.id });
+    const parents = inv.views.hypothesis_view.edges.filter(e => e.to === h.id);
+    if (parents.length === 1 && parents[0].from !== "question" && nodes.has(parents[0].from)) {
+      nodes.get(h.id).parent = parents[0].from;
+      graph.edges.push({ kind: "parent", from: parents[0].from, to: h.id, relationship: "investigation_parent" });
     }
   }
   graph.nodes = [...nodes.values()];
@@ -324,6 +338,12 @@ export function renderInvestigation(g) {
     for (const f of c.findings) lines.push(`- ${f.summary}；观察 ${f.evidence.join(", ") || "未提供精确引用"}；引用检查 ${f.reference_check}`);
     for (const u of c.unresolved) lines.push(`- 未解：${u.question}；缺少：${u.missing}；下一步：${u.next_step}`);
     lines.push("", `下一动作：${c.next.action}；理由：${c.next.reason}`, "");
+  }
+  if (g.views) {
+    lines.push("### 假设路径", "", `调查问题：${g.views.hypothesis_view.root.question ?? "缺少显式问题记录"}`, "");
+    for (const edge of g.views.hypothesis_view.edges) lines.push(`- ${edge.from} → ${edge.to}：${edge.reason}（追问关系，非因果裁决）`);
+    if (g.views.hypothesis_view.unplaced.length) lines.push(`- 缺少可用父关联：${g.views.hypothesis_view.unplaced.join(", ")}`);
+    lines.push("");
   }
   for (const target of [...g.hypotheses, ...(g.relations ?? [])]) {
     const kind = target.from ? "relation" : "hypothesis";

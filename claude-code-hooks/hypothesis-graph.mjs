@@ -635,6 +635,10 @@ export function writeGraph(spans, out, source = {}, opts = {}) {
   const mp = path.join(out, "forward-path.md");
   fs.writeFileSync(jp, `${JSON.stringify(g, null, 2)}\n`);
   fs.writeFileSync(mp, renderMd(g));
+  if (g.investigation?.views) {
+    fs.writeFileSync(path.join(out, "hypothesis-view.json"), JSON.stringify(g.investigation.views.hypothesis_view, null, 2) + "\n");
+    fs.writeFileSync(path.join(out, "investigation-steps.json"), JSON.stringify(g.investigation.views.investigation_steps, null, 2) + "\n");
+  }
   const concl = agentConclusion(spans);
   if (concl) {
     fs.writeFileSync(path.join(out, "forward-conclusion.md"), `# 被测 agent 的最终回答（root span output 原文）\n\n${concl.trim()}\n`);

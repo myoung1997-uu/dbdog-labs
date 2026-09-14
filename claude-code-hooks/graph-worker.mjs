@@ -43,7 +43,8 @@ export function graphDir(traceId) {
  */
 async function collectSourceEvidence(spans, note) {
   // 显式记录已带精确来源，不调用另一个模型重新猜测源码证据或状态。
-  if (extractInvestigationEvents(spans).events.length) return { sourceEvidence: {}, sourceVerdict: {}, tried: 0, got: 0 };
+  const recording = extractInvestigationEvents(spans);
+  if (recording.events.length || recording.diagnostics.length) return { sourceEvidence: {}, sourceVerdict: {}, tried: 0, got: 0 };
   const cands = sourceEvidenceCandidates(spans);
   if (!cands.length) return { sourceEvidence: {}, sourceVerdict: {}, tried: 0, got: 0 };
   const env = summaryEnv();

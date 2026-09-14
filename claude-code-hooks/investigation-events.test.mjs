@@ -213,7 +213,7 @@ describe("阶段交付与验证职责", () => {
         reason: "问题范围内已回答", evidence: [], unresolved: [] }])]).investigation;
     expect(g.hypotheses[0]).toMatchObject({ state: "supported", history: [{ reference_check: "not_provided", evidence_complete: false }] });
     expect(g.finishes[0]).toMatchObject({ checkpoint: "stage1", reference_check: "not_provided" });
-    expect(g.diagnostics).toEqual([]);
+    expect(g.diagnostics.filter(d => !["missing_investigation_parent", "missing_investigation_question"].includes(d.code))).toEqual([]);
   });
 
   it("后面的工具结果不能追认先前观察；原文即使相同也拒绝匹配", () => {
