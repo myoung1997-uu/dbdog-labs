@@ -42,7 +42,7 @@ export const LABEL_SCHEMA = [
   { label: "findings", value_type: "json", display: "问题（一条一个：确定是 bug / 要人定）+ 对之前几轮条目的复验" },
   { label: "finding_kinds", value_type: "json", display: "这一次有哪两类问题（由 import 从 findings 算出，筛选用）" },
   { label: "summary", value_type: "string", display: "总评（大白话，≤ 600 字符）" },
-  { label: "fix_marks", value_type: "json", display: "修复标记（改了等复验 / 要人协助 / 不修；fix-mark.mjs 写）" },
+  { label: "fix_marks", value_type: "json", display: "修复标记（改了等复测 / 复测通过 / 复测没过 / 要人协助 / 不修；fix-mark.mjs 写）" },
   { label: "rubric_version", value_type: "string", display: "判的是哪一版判卷口径（由 import 从包里记的那份写）" },
 ];
 
@@ -82,8 +82,84 @@ export const DECISIONS = ["wording", "capability", "case", "is_bug"];
 /** 判官写不了的旧字段：出现即整包拒（读侧另有 `normalizeFindings` 的宽容映射）。 */
 export const RETIRED_ITEM_FIELDS = ["kind", "qualifier", "verified", "rule_ref", "suspected_kind", "suggestion", "layer", "fix_where"];
 
-/** 修复标记三值（§13.3）：改了等复验 / 要人协助 / 不修。 */
+/** 修复标记三值（§13.3）：改了 / 要人协助 / 不修。显示成什么字看 `fixMarkLabel`。 */
 export const FIX_MARK_STATUSES = ["claimed_fixed", "needs_human", "wont_fix"];
+
+/**
+ * 修复标记里的**数据情况**（§15.5）：库里的历史数据怎么样了。
+ * · `unaffected`   纯读取或查询错，库里数据本来就是对的；
+ * · `repaired`     数据错了，按确定的规则改回来了；
+ * · `unrepairable` 修不回来（比如当时就没采到）——原窗口里没有对的数据，复测不了，只能等重跑。
+ *
+ * 为什么要记：它决定修完之后**能不能在原窗口复测**，也决定页面建议点哪几个按钮（§15.4）——
+ * 修不回来的要新造现场，旧窗口再诊断一百遍查到的也还是错的数据。
+ */
+export const FIX_MARK_DATA = ["unaffected", "repaired", "unrepairable"];
+
+/**
+ * 修复标记里的**复测结果**（§15.5）：部署后在挖出它的那次诊断的原窗口原样重放 `repro`。
+ * 「确定是 bug」的 `passed` 即关（不等重跑），`failed` 仍开着。
+ */
+export const FIX_MARK_VERIFY = ["passed", "failed"];
+
+/**
+ * 修复标记的组合校验（fix-mark.mjs 写口用；纯函数，单测钉住）。回问题清单，空 = 合法。
+ *
+ * 只钉两条组合规则：
+ * · 复测只跟 `claimed_fixed` 走——没改就没有「改完在原窗口重放」这回事；
+ * · 数据修不回来的不许带复测——原窗口里的数据本身是错的，重放「通过 / 没过」验的都不是这次修复。
+ * 两格都不带的旧写法照样合法（2026-09-14 之前打的标记都没有这两格）。
+ */
+export function fixMarkProblems({ status, data, verify } = {}) {
+  const problems = [];
+  if (!FIX_MARK_STATUSES.includes(status)) problems.push(`--status 只能是 ${FIX_MARK_STATUSES.join(" / ")}`);
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  if (has(data) && !FIX_MARK_DATA.includes(data)) {
+    problems.push(`--data 只能是 ${FIX_MARK_DATA.join(" / ")}（数据没受影响 / 数据已修复 / 数据修不回来）`);
+  }
+  if (has(verify)) {
+    if (!FIX_MARK_VERIFY.includes(verify)) problems.push(`--verify 只能是 ${FIX_MARK_VERIFY.join(" / ")}`);
+    if (status !== "claimed_fixed") problems.push("--verify 只能跟 --status claimed_fixed 一起用：没改就没有「改完在原窗口重放」这回事");
+    if (data === "unrepairable") problems.push("--data unrepairable 不能带 --verify：数据修不回来，原窗口里重放验的不是这次修复，只能等重跑");
+  }
+  return problems;
+}
+
+/**
+ * 修复标记显示成什么字（2026-09-14 定，脚本里 fix-context / fix-mark / loop-pending / scorecard 统一用这一套）。
+ * 字要让人一眼看出**下一步等什么**，所以按类别分：确定是 bug 的在自己这一层复测，别的等下次判题。
+ */
+export const FIX_MARK_LABELS = {
+  awaiting_verify: "改了，等复测",
+  verify_passed: "复测通过",
+  verify_failed: "复测没过",
+  unrepairable: "数据修不回来，等下次诊断和判题时验证",
+  awaiting_judge: "改了，等下次判题验证",
+  needs_human: "要人协助",
+  wont_fix: "不修",
+};
+
+/**
+ * 一份修复标记 + 它那条问题的类别 → `FIX_MARK_LABELS` 的键；没有标记回 null。
+ * 类别认不出按确定是 bug 算（与关单回放的缺省同一条）。
+ */
+export function fixMarkState(cls, mark) {
+  const m = mark && typeof mark === "object" ? mark : (typeof mark === "string" && mark ? { status: mark } : null);
+  if (!m?.status) return null;
+  if (m.status === "needs_human" || m.status === "wont_fix") return m.status;
+  if (m.status !== "claimed_fixed") return null;
+  if (cls === "needs_decision") return "awaiting_judge";
+  if (m.data === "unrepairable") return "unrepairable";
+  if (m.verify === "passed") return "verify_passed";
+  if (m.verify === "failed") return "verify_failed";
+  return "awaiting_verify";
+}
+
+/** 修复标记显示的字；没有标记回空串。 */
+export function fixMarkLabel(cls, mark) {
+  const st = fixMarkState(cls, mark);
+  return st ? FIX_MARK_LABELS[st] : (mark?.status ?? "");
+}
 
 /** 探针 outcome 四值（与 evidence-chain 同口径）。 */
 export const PROBE_OUTCOMES = ["obtained_match", "obtained_mismatch", "empty_or_error", "no_tool"];
@@ -771,34 +847,143 @@ export function normalizeFindings(value) {
  * 都算没关），写在 skill 里；web 读侧另有一份算状态的实现给人看。这里多算一遍就是第三份副本。
  * 修复标记（`fix_marks`）也原样带上：修的人说「改了」，判题方复验时该走到那条路去验。
  *
- * @param {{ experiment: {id:string,name:string,created_at:string}, traceId: string }[]} runs 这道题**之前**的运行
+ * ## 一次诊断可以判多次（§15.6）
+ *
+ * 复现、诊断、判题是三张表：人点「判题」是在那次诊断下**加一条判题**。于是同一条 trace 可能挂着
+ * 好几次判题，而批注表只放最近一次判完的（D5「投影覆盖、历史保留」）。所以每一次判题的全文取自
+ * 判题表那一行的 `judgement` 快照，一次一个元素，按 `judged_at` 排；这条 trace 一行快照都没有
+ * （迁移前的老数据、或 server 还没有判题表）才退回读批注表——那时它只看得到一次判题。
+ *
+ * **修复标记不取快照里的那份**：标记是判完之后修的人打在 trace 上的，快照抄的是判完那一刻的批注，
+ * 抄不到之后打的标记。标记按 key 取 `at` 最新的一份（快照里的旧份与批注表里的现份合起来比），
+ * 挂在这条 trace 最后一次判题上；它在时间轴上排在哪由 `judge-quality.mjs` 按 `at` 定。
+ *
+ * ## 时间轴是诊断时间，不是判题时间（§15.5，2026-09-14 定）
+ *
+ * 每个元素带 `diagnosed_at`：这条 trace 是什么时候跑出来的。取诊断表那一行的 `created_at`，
+ * 拿不到（server 还没有诊断表、或手工发起的诊断）退回运行的开始时刻 `startedAt`（trace root 起跑时刻）。
+ * 两个都没有就不带这一格，排序退回运行建行时刻。元素按诊断时间排，同一次诊断的几次判题按判完时刻排。
+ * 为什么：trace 的内容定下来就不会变——修复之前跑出来的诊断，今天重判一百次看到的也还是修复前的路径，
+ * 它的「又撞上」不能推翻修复之后的复测（见 `judge-quality.mjs`）。
+ *
+ * @param {{ experiment: {id:string,name:string,created_at:string}, traceId: string, startedAt?: string }[]} runs
+ *   这道题的运行（`dataset-traces.mjs` 的 `asJudgedRuns`）
  * @param {Map<string, any[]>} interactionsByTrace `findAllAnnotationsByContent` 的返回
+ * @param {{ judgements?: any[], diagnosisRuns?: any[] }} [layers] 判题表行与诊断表行（`case-diag-client.mjs` 的
+ *   `caseHistoryOfRecords`）；不给 = 只读批注表、诊断时间用 `startedAt`
+ * @returns 旧的在前；快照来的元素多带 `judgement_id` / `diagnosis_id` / `judged_at`
  */
-export function priorJudgments(runs, interactionsByTrace) {
-  return [...runs]
-    .sort((a, b) => String(a.experiment.created_at).localeCompare(String(b.experiment.created_at)))
-    .map(({ experiment, traceId }) => {
-      const labels = new Map();
-      for (const it of interactionsByTrace.get(traceId) ?? []) {
-        for (const an of it.annotations ?? []) if (an.label && !labels.has(an.label)) labels.set(an.label, an.value);
-      }
-      if (!labels.size) return { round: experiment.name, round_id: experiment.id, created_at: experiment.created_at, trace_id: traceId, judged: false };
-      const { items, checks } = normalizeFindings(labels.get("findings"));
-      let marks = labels.get("fix_marks") ?? {};
-      if (typeof marks === "string") { try { marks = JSON.parse(marks); } catch { marks = {}; } }
-      return {
-        round: experiment.name,
-        round_id: experiment.id,
-        created_at: experiment.created_at,
-        trace_id: traceId,
-        judged: true,
-        verdict: labels.get("verdict") ?? null,
-        evidence: labels.get("evidence") ?? null,
-        items,
-        checks,
-        fix_marks: marks && typeof marks === "object" && !Array.isArray(marks) ? marks : {},
-      };
-    });
+export function priorJudgments(runs, interactionsByTrace, { judgements = [], diagnosisRuns = [] } = {}) {
+  const diagnosedAtByTrace = new Map();
+  for (const row of diagnosisRuns ?? []) {
+    if (row?.trace_id && row.created_at && !diagnosedAtByTrace.has(row.trace_id)) diagnosedAtByTrace.set(row.trace_id, row.created_at);
+  }
+  const snapshotsByTrace = new Map();
+  for (const row of judgements ?? []) {
+    const snap = judgementSnapshotOf(row);
+    if (!snap) continue;
+    const list = snapshotsByTrace.get(row.trace_id) ?? [];
+    list.push(snap);
+    snapshotsByTrace.set(row.trace_id, list);
+  }
+
+  const out = [];
+  for (const { experiment, traceId, startedAt } of [...runs].sort((a, b) => compareTime(a.experiment.created_at, b.experiment.created_at))) {
+    const diagnosedAt = diagnosedAtByTrace.get(traceId) || startedAt || "";
+    const base = {
+      round: experiment.name, round_id: experiment.id, created_at: experiment.created_at, trace_id: traceId,
+      ...(diagnosedAt ? { diagnosed_at: diagnosedAt } : {}),
+    };
+    const live = new Map();
+    for (const it of interactionsByTrace.get(traceId) ?? []) {
+      for (const an of it.annotations ?? []) if (an.label && !live.has(an.label)) live.set(an.label, an.value);
+    }
+    const snaps = (snapshotsByTrace.get(traceId) ?? []).sort((a, b) => compareTime(a.judged_at, b.judged_at));
+    if (snaps.length) {
+      const marks = latestMarksOf([...snaps.map((s) => s.labels.fix_marks), live.get("fix_marks")]);
+      snaps.forEach((s, i) => {
+        out.push({
+          ...judgedRound(base, (label) => s.labels[label], i === snaps.length - 1 ? marks : {}),
+          judgement_id: s.id,
+          diagnosis_id: s.diagnosis_id,
+          judged_at: s.judged_at,
+        });
+      });
+      continue;
+    }
+    if (!live.size) { out.push({ ...base, judged: false }); continue; }
+    out.push(judgedRound(base, (label) => live.get(label), latestMarksOf([live.get("fix_marks")])));
+  }
+  // 按**诊断时间**排，同一次诊断的几次判题按判完时刻排。数组 sort 是稳定的，同时刻保持上面的次序。
+  return out.sort((a, b) => compareTime(diagnosisTimeOf(a), diagnosisTimeOf(b)) || compareTime(a.judged_at ?? "", b.judged_at ?? ""));
+}
+
+/** 一轮判题在复验时间轴上的位置：它所属那次诊断的时间，没有就退回运行建行时刻。 */
+export function diagnosisTimeOf(round) {
+  return round?.diagnosed_at || round?.created_at || "";
+}
+
+function judgedRound(base, labelOf, fixMarks) {
+  const { items, checks } = normalizeFindings(labelOf("findings"));
+  return {
+    ...base,
+    judged: true,
+    verdict: labelOf("verdict") ?? null,
+    evidence: labelOf("evidence") ?? null,
+    items,
+    checks,
+    fix_marks: fixMarks,
+  };
+}
+
+const parseJsonObject = (v) => {
+  let x = v;
+  if (typeof x === "string") { try { x = JSON.parse(x); } catch { return null; } }
+  return x && typeof x === "object" && !Array.isArray(x) ? x : null;
+};
+
+/**
+ * 判题表一行（`GET /api/v1/llm-obs/case-judgements`）→ `{id, diagnosis_id, judged_at, labels}`；不算一次判完的判题回 null。
+ *
+ * 两个闸：行得在 `judged` 态（快照是推到判完时抄的；待判题 / 判题中 / 被挡住的行还没有这一次判题）；
+ * 快照里得有判题方写的 label（只剩修复标记的不是一次判题）。
+ */
+export function judgementSnapshotOf(row) {
+  if (!row || row.status !== "judged" || !row.trace_id) return null;
+  const snap = parseJsonObject(row.judgement);
+  const labels = parseJsonObject(snap?.labels);
+  if (!labels || !JUDGE_WRITTEN_LABELS.some((l) => labels[l] !== undefined)) return null;
+  return { id: row.id ?? null, diagnosis_id: row.diagnosis_id ?? null, judged_at: row.judged_at ?? null, labels };
+}
+
+/**
+ * 几份 `fix_marks` 合成一份：同一个 key 取 `at` 最新的；`at` 比不出先后（缺 / 坏）时后给的赢——
+ * 调用方把批注表里的现份放在最后，它是 fix-mark.mjs 读回合并后写的全量。
+ */
+function latestMarksOf(maps) {
+  const out = {};
+  for (const m of maps) {
+    const obj = parseJsonObject(m);
+    if (!obj) continue;
+    for (const [key, mark] of Object.entries(obj)) {
+      const prev = out[key];
+      const tp = Date.parse(prev?.at ?? "");
+      const tn = Date.parse(mark?.at ?? "");
+      if (!prev || Number.isNaN(tp) || Number.isNaN(tn) || tn >= tp) out[key] = mark;
+    }
+  }
+  return out;
+}
+
+/**
+ * 按时刻比，不按串比：诊断表的时刻带 `+08:00` 偏移、修复标记的 `at` 是 `Z`，串比会把两者排反。
+ * 解析不了的退回串比（老夹具里有「x」这种占位）。
+ */
+export function compareTime(a, b) {
+  const ta = Date.parse(a ?? "");
+  const tb = Date.parse(b ?? "");
+  if (!Number.isNaN(ta) && !Number.isNaN(tb)) return ta - tb;
+  return String(a ?? "").localeCompare(String(b ?? ""));
 }
 
 /** label 值的形状校验（只判形状，不判判得对不对）。 */

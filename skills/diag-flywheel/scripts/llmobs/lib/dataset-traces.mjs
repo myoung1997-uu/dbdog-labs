@@ -36,7 +36,10 @@ export async function resolveDatasetTraces({ project: projectName, dataset: data
  * 带上轮次的建行时刻——**判题跟着轮次走**（飞轮设计 §13），「之前几轮」得按它排。
  *
  * @param {{ projectID: string, recordIDs: Iterable<string> }} q
- * @returns {Promise<Map<string, {experimentId:string,experimentName:string,experimentCreatedAt:string,traceId:string,eventId:string}[]>>}
+ * `startedAt` 是这次运行的开始时刻（event 的 `timestamp_ms`：server 按 root span 的起跑时刻记，§13.2 实测两者差 0.4–3.1 秒）。
+ * 复验的时间轴是**诊断时间**（§15.5）：诊断表拿不到诊断记录的时刻时，就退回用它。
+ *
+ * @returns {Promise<Map<string, {experimentId:string,experimentName:string,experimentCreatedAt:string,startedAt:string,traceId:string,eventId:string}[]>>}
  */
 export async function runsOfRecords({ projectID, recordIDs }) {
   const wanted = new Set(recordIDs);
@@ -52,9 +55,22 @@ export async function runsOfRecords({ projectID, recordIDs }) {
       const rid = ev.dataset_record_id;
       if (!rid || !wanted.has(rid)) continue; // 别的集合的题、或已删的题
       const list = runsByRecord.get(rid) ?? [];
-      list.push({ experimentId: exp.id, experimentName: exp.name, experimentCreatedAt: exp.created_at ?? "", traceId: ev.trace_id ?? "", eventId: ev.id });
+      const startedAt = Number.isFinite(ev.timestamp_ms) && ev.timestamp_ms > 0 ? new Date(ev.timestamp_ms).toISOString() : "";
+      list.push({ experimentId: exp.id, experimentName: exp.name, experimentCreatedAt: exp.created_at ?? "", startedAt, traceId: ev.trace_id ?? "", eventId: ev.id });
       runsByRecord.set(rid, list);
     }
   }
   return runsByRecord;
+}
+
+/**
+ * `runsOfRecords` 的一条运行 → `priorJudgments` 要的入参形状。五个脚本都要这一步，写一份。
+ * @param {{experimentId:string,experimentName:string,experimentCreatedAt:string,startedAt?:string,traceId:string}[]} runs
+ */
+export function asJudgedRuns(runs) {
+  return (runs ?? []).filter((r) => r.traceId).map((r) => ({
+    experiment: { id: r.experimentId, name: r.experimentName, created_at: r.experimentCreatedAt },
+    traceId: r.traceId,
+    startedAt: r.startedAt ?? "",
+  }));
 }

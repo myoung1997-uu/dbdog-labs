@@ -22,11 +22,13 @@ import {
   findProject, findDataset, listDatasets, listRecords, listCPExperiments,
   findAllAnnotationsByContent, getTrace, requireCredential,
 } from "./lib/exp-client.mjs";
-import { runsOfRecords } from "./lib/dataset-traces.mjs";
+import { runsOfRecords, asJudgedRuns } from "./lib/dataset-traces.mjs";
+import { caseHistoryOfRecords, legacyDiagnosesOfRecords } from "./lib/case-diag-client.mjs";
 import { priorJudgments } from "./lib/judge-package.mjs";
 import {
   collectItems, pointerSpanIds, findSpanByPrefix, renderSpanDoc,
-  renderReadme, renderTrueBugs, renderNeedsDecision, itemsJson, workDirName, classLabel,
+  renderReadme, renderTrueBugs, renderNeedsDecision, itemsJson, workDirName, classLabel, markText,
+  diagnosisWindows, attachWindows, windowText,
 } from "./lib/fix-context.mjs";
 
 const argOf = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
@@ -71,14 +73,18 @@ const runs = ((await runsOfRecords({ projectID: project.id, recordIDs: [record.i
 if (!runs.length) fail(`这道题还没跑过（没有任何 trace）：${record.id}`);
 
 const interactions = await findAllAnnotationsByContent(runs.map((r) => r.traceId));
-const rounds = priorJudgments(
-  runs.map((r) => ({ experiment: { id: r.experimentId, name: r.experimentName, created_at: r.experimentCreatedAt }, traceId: r.traceId })),
-  interactions,
-);
+// 同一条诊断可以判多次（§15.6）：每一次取判题表的快照；诊断时间取诊断表。server 还没有这两张表时退回批注表与 trace 开始时刻
+const layers = await caseHistoryOfRecords([record.id]);
+const rounds = priorJudgments(asJudgedRuns(runs), interactions, layers);
 const judged = rounds.filter((r) => r.judged !== false);
 if (!judged.length) fail(`这道题跑过 ${runs.length} 轮但一轮都没判过——没判就没有条目可修，先跑判题那一棒`);
 const latest = judged[judged.length - 1];
-const items = collectItems(rounds);
+
+// 复测窗口：挖出每条问题的那次诊断的复现窗口（复测就在这上面重放）。诊断表没有就退回老表 case-diagnoses。
+const windowRows = layers.hasDiagnosisRuns ? layers.diagnosisRuns : await legacyDiagnosesOfRecords([record.id]);
+if (!windowRows) console.error("⚠ 诊断表与老表 case-diagnoses 都读不到（404）：工作包里没有复测窗口，得去页面「历次」里按 trace 找");
+const collected = collectItems(rounds);
+const items = windowRows ? attachWindows(collected, diagnosisWindows(windowRows)) : collected;
 
 // ── ③ 最新判过那轮的 trace 与判题过程分析 ────────────────────────────────────
 let spans = [];
@@ -115,9 +121,10 @@ fs.writeFileSync(path.join(dir, "items.json"), `${JSON.stringify(itemsJson({ dat
 
 const open = items.filter((it) => it.open);
 console.error(`✓ 修复工作包 → ${path.resolve(dir)}`);
-console.error(`  ${datasetName} / ${record.id}　判过 ${judged.length} 轮，最新那轮 ${latest.round}（trace ${latest.trace_id}）`);
+console.error(`  ${datasetName} / ${record.id}　判过 ${judged.length} 次，最新那次 ${latest.round}（trace ${latest.trace_id}${latest.judged_at ? `，${latest.judged_at} 判完` : ""}）`);
 console.error(`  还没关的问题 ${open.length} 条${items.length > open.length ? `（另有 ${items.length - open.length} 条已关，留着做参照）` : ""}：`);
 for (const it of open) {
-  console.error(`   · ${it.key}　${classLabel(it)}${it.fix_mark?.status ? `　[已有标记：${it.fix_mark.status}]` : ""}`);
+  console.error(`   · ${it.key}　${classLabel(it)}${it.fix_mark?.status ? `　[${markText(it)}${it.fix_mark_superseded ? "，已被更晚的诊断撞上、不作数" : ""}]` : ""}`);
+  if (it.window !== undefined) console.error(`     复测窗口：${windowText(it.window).replace(/\*\*/g, "")}`);
 }
 console.error("  先读 README.md 里那段判题过程分析，再读条目。");

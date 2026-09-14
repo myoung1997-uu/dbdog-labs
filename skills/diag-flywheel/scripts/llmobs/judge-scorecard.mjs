@@ -17,9 +17,10 @@
 //
 // env 同 run-experiment（DBDOG_BASE_URL / DBDOG_API_KEY 或 DBDOG_INTERNAL_TOKEN / DBDOG_ORG）。
 import { findProject, findAllAnnotationsByContent, requireCredential } from "./lib/exp-client.mjs";
-import { resolveDatasetTraces } from "./lib/dataset-traces.mjs";
-import { priorJudgments } from "./lib/judge-package.mjs";
+import { resolveDatasetTraces, asJudgedRuns } from "./lib/dataset-traces.mjs";
+import { priorJudgments, FIX_MARK_LABELS } from "./lib/judge-package.mjs";
 import { qualityReport, openFindings } from "./lib/judge-quality.mjs";
+import { caseHistoryOfRecords } from "./lib/case-diag-client.mjs";
 
 const argOf = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
 const fail = (m) => { console.error(`✗ ${m}`); process.exit(1); };
@@ -35,16 +36,16 @@ const project = await findProject(PROJECT);
 if (!project?.id) fail(`project 不存在：${PROJECT}`);
 const { runsByRecord } = await resolveDatasetTraces({ project: PROJECT, dataset: DATASET });
 
+// 判题表的快照（同一条诊断判多次时每一次一份，§15.6）与诊断时间；server 还没有这两张表时退回批注表与 trace 开始时刻
+const layers = await caseHistoryOfRecords([...runsByRecord.entries()].filter(([id, runs]) => (!ONLY || id === ONLY) && runs.some((r) => r.traceId)).map(([id]) => id));
+
 const perCase = [];
 for (const [recordId, runs] of runsByRecord) {
   if (ONLY && recordId !== ONLY) continue;
   const withTrace = runs.filter((r) => r.traceId);
   if (!withTrace.length) continue;
   const interactions = await findAllAnnotationsByContent(withTrace.map((r) => r.traceId));
-  const rounds = priorJudgments(
-    withTrace.map((r) => ({ experiment: { id: r.experimentId, name: r.experimentName, created_at: r.experimentCreatedAt }, traceId: r.traceId })),
-    interactions,
-  ).filter((r) => r.judged !== false);
+  const rounds = priorJudgments(asJudgedRuns(withTrace), interactions, layers).filter((r) => r.judged !== false);
   if (!rounds.length) continue;
   perCase.push({ record_id: recordId, report: qualityReport(rounds), open: openFindings(rounds) });
 }
@@ -63,6 +64,8 @@ const total = {
   needs_human_marks: sum((r) => r.needs_human_marks),
   marked: sum((r) => r.marked),
   wont_fix: sum((r) => r.wont_fix),
+  verify_passed: sum((r) => r.verify_passed),
+  verify_failed: sum((r) => r.verify_failed),
   check_due: sum((r) => r.check_coverage.due),
   check_missed: sum((r) => r.check_coverage.missed.length),
   open_now: sum((r) => r.open_now),
@@ -86,5 +89,6 @@ console.error(`· 判过 ${total.cases} 道题 / ${total.rounds} 轮，提出问
 console.error(`· 弃判率 ${pct(total.items_total ? total.abstained / total.items_total : 0)}（「看不出是不是 bug」那一档：要人去核，不是挖到的 bug）`);
 console.error(`· 要人的两个数不相加：判官说要人定 ${total.needs_decision_items} 条 · 修的人说要人协助 ${total.needs_human_marks} 条`);
 console.error(`· 无效条目率 ${pct(total.marked ? total.wont_fix / total.marked : null)}（分母是被修的人标过的 ${total.marked} 条；超 10% 就该回头改 rubric，不是催判官多提）`);
+console.error(`· 修的人原窗口复测：${FIX_MARK_LABELS.verify_passed} ${total.verify_passed} 条 · ${FIX_MARK_LABELS.verify_failed} ${total.verify_failed} 条（确定是 bug 的复测通过即关）`);
 console.error(`· 复验：该验 ${total.check_due} 条，漏验 ${total.check_missed} 条${total.check_missed ? "  ← 漏验与「真没修好」在页面上长得一样" : ""}`);
 console.error(`· 现在还开着 ${total.open_now} 条`);

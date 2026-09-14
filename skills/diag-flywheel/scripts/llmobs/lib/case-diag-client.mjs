@@ -181,6 +181,119 @@ export async function blockDiagnosis({ id, from, reason }) {
   return advanceDiagnosis({ id, from, to: DIAG_BLOCKED, reason });
 }
 
+const llmobsPath = (resource, qs) => `${baseUrl().replace(/\/+$/, "")}/api/v1/llm-obs/${resource}${qs ? `?${qs}` : ""}`;
+const rowsOf = (out) => (Array.isArray(out) ? out : (out?.data ?? []));
+
+/**
+ * 列判题行（§15.6 / §15.8：复现、诊断、判题三张表，这是判题那张）。一行 = 对某次诊断判的一次卷，
+ * 判完的带 `judgement` 快照 `{labels, annotator, rubric_version}` 与 `judged_at`。
+ *
+ * 为什么判题历史要读它而不是批注表：同一条 trace 可以判好几次，批注表只放最近一次判完的
+ * （D5「投影覆盖、历史保留」），之前每一次判成什么只留在各自那一行的快照里。
+ *
+ * 过滤参数一个值一个请求，不拼逗号——那几个参数收不收多值没有对照过，拼错了 server 回空，
+ * 看起来就像「这道题没判过」。
+ */
+export async function listJudgements({ recordId, diagnosisId, traceId, statuses, limit } = {}) {
+  const q = new URLSearchParams();
+  if (recordId) q.set("record_id", recordId);
+  if (diagnosisId) q.set("diagnosis_id", diagnosisId);
+  if (traceId) q.set("trace_id", traceId);
+  if (statuses?.length) q.set("status", statuses.join(","));
+  if (limit) q.set("limit", String(limit));
+  return rowsOf(await call(llmobsPath("case-judgements", q.toString())));
+}
+
+/**
+ * 列诊断行（§15.8 三张表里的诊断那张）。一行 = 在某次复现窗口上跑的一次诊断，带 `trace_id`、
+ * 诊断记录建行时刻 `created_at`，以及从复现带出来的窗口（`window_start` / `window_end` / `instance` / `expires_at`）。
+ * 窗口字段名照老表 `case-diagnoses` 的写（推的，server 上线后按真响应核）。
+ */
+export async function listDiagnosisRuns({ recordId, reproductionId, statuses, limit } = {}) {
+  const q = new URLSearchParams();
+  if (recordId) q.set("record_id", recordId);
+  if (reproductionId) q.set("reproduction_id", reproductionId);
+  if (statuses?.length) q.set("status", statuses.join(","));
+  if (limit) q.set("limit", String(limit));
+  return rowsOf(await call(llmobsPath("case-diagnosis-runs", q.toString())));
+}
+
+/**
+ * 一道题一个请求、并发几个，行合在一起回；接口 404 回 `null`（server 还没有这张表）。
+ * 一道题的行数顶到 `limit` 就抛：server 按时间倒序截断，截掉的是**最早**的几行，
+ * 待复验清单会把早就关掉的条目算成还开着（§13.2 #2 那种静默截断，不许再来一次）。
+ */
+async function perRecord(recordIds, fetchOne, { limit = 1000, concurrency = 6, what }) {
+  const ids = [...new Set([...(recordIds ?? [])].filter(Boolean))];
+  const rows = [];
+  let next = 0;
+  let missing = false;
+  const worker = async () => {
+    while (!missing && next < ids.length) {
+      const id = ids[next++];
+      let got;
+      try {
+        got = await fetchOne(id, limit);
+      } catch (e) {
+        if (e.status === 404) { missing = true; return; }
+        throw e;
+      }
+      if (got.length >= limit) {
+        throw new Error(`用例 ${id} 的${what}顶到了 limit=${limit}：server 截掉的是最早的几行，待复验清单会算错——调大 limit 再跑`);
+      }
+      rows.push(...got);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker));
+  return missing ? null : rows;
+}
+
+/**
+ * 一批题的全部判题行，给 `priorJudgments` 读快照用。回 `null` = server 还没有判题表（接口 404），
+ * 调用方退回读批注表那条老路（那时每条 trace 只看得到最近一次判题）——脚本不因此失败，但要说出来。
+ */
+export async function judgementsOfRecords(recordIds, { limit = 1000, concurrency = 6, onFallback } = {}) {
+  const rows = await perRecord(recordIds, (id, lim) => listJudgements({ recordId: id, limit: lim }), { limit, concurrency, what: "判题行" });
+  if (!rows) {
+    (onFallback ?? ((m) => console.error(m)))(
+      "⚠ server 还没有判题表接口（GET /api/v1/llm-obs/case-judgements 回 404）：判题历史退回读批注表，同一条诊断判过几次也只看得到最近一次",
+    );
+  }
+  return rows;
+}
+
+/** 一批题的全部诊断行（新表）。回 `null` = server 还没有诊断表（接口 404）。 */
+export async function diagnosisRunsOfRecords(recordIds, { limit = 1000, concurrency = 6 } = {}) {
+  return perRecord(recordIds, (id, lim) => listDiagnosisRuns({ recordId: id, limit: lim }), { limit, concurrency, what: "诊断行" });
+}
+
+/**
+ * 读判题历史要的两样一次取齐：判题表的快照（每一次判题一份）与诊断表的诊断时刻（复验的时间轴，§15.5）。
+ * 哪样的接口 404 就给空数组并说一句退回了什么——脚本不因 server 还没上线三张表而失败。
+ */
+export async function caseHistoryOfRecords(recordIds, { onFallback } = {}) {
+  const say = onFallback ?? ((m) => console.error(m));
+  const [judgements, diagnosisRuns] = await Promise.all([
+    judgementsOfRecords(recordIds, { onFallback: say }),
+    diagnosisRunsOfRecords(recordIds),
+  ]);
+  if (!diagnosisRuns) {
+    say("⚠ server 还没有诊断表接口（GET /api/v1/llm-obs/case-diagnosis-runs 回 404）：诊断时间退回用 trace 的开始时刻");
+  }
+  return { judgements: judgements ?? [], diagnosisRuns: diagnosisRuns ?? [], hasDiagnosisRuns: Boolean(diagnosisRuns) };
+}
+
+/**
+ * 老表 `case-diagnoses` 的行（一行 = 复现 + 诊断 + 判题，带 `trace_id` 与窗口）。修复工作包要复现窗口时，
+ * 诊断表 `case-diagnosis-runs` 404 就退回读它；它也 404 回 `null`。
+ *
+ * 只拿它的窗口，不拿它的 `created_at` 当诊断时间：老表那一格是复现回执落地的时刻，诊断是之后才跑的，
+ * 拿它排时间轴会把修复之后才跑的诊断排到修复之前。
+ */
+export async function legacyDiagnosesOfRecords(recordIds, { limit = 1000 } = {}) {
+  return perRecord(recordIds, (id, lim) => listDiagnoses({ recordIds: [id], limit: lim }), { limit, concurrency: 6, what: "诊断行（老表）" });
+}
+
 /** 列诊断行（看积压用）。statuses 为空 = 不筛。 */
 export async function listDiagnoses({ statuses, recordIds, blockedReasons, limit } = {}) {
   const q = new URLSearchParams();

@@ -24,10 +24,11 @@
 //
 // env：DBDOG_BASE_URL + DBDOG_API_KEY（或装 hooks 时配的 DBDOG_OBS_API_KEY）。
 import { CP, call, findAllAnnotationsByContent, requireCredential } from "./lib/exp-client.mjs";
-import { resolveDatasetTraces } from "./lib/dataset-traces.mjs";
+import { resolveDatasetTraces, asJudgedRuns } from "./lib/dataset-traces.mjs";
 import { windowClause } from "./lib/case-window.mjs";
-import { priorJudgments } from "./lib/judge-package.mjs";
+import { priorJudgments, fixMarkLabel } from "./lib/judge-package.mjs";
 import { openFindings } from "./lib/judge-quality.mjs";
+import { caseHistoryOfRecords } from "./lib/case-diag-client.mjs";
 
 const argOf = (n, d) => { const i = process.argv.indexOf(n); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
 const has = (n) => process.argv.includes(n);
@@ -100,30 +101,41 @@ for (const rec of records) {
 // ── 还没修的（`--kind fix`，飞轮 §14）──────────────────────────────────────────
 //
 // 判据三条，缺一不可：这道题**判过**、还有**没关的问题**（关单规则单源在 lib/judge-quality.mjs）、
-// 且这些问题里**至少一条没人接**（没打过 `claimed_fixed`；`wont_fix` 已被 openFindings 挡在外面）。
-// 第三条是为了让清单跟着人走：全都打了「改了等复验」的那道题，等的是下一次复现，不是等人修——
+// 且这些问题里**至少一条没人接**。
+//
+// 「没关」已经把复测通过的确定是 bug 挡在外面（§15.5：`claimed_fixed + verify: passed` 即关），
+// `wont_fix` 也是。「有人接了」= 打了 `claimed_fixed` 且**没被之后的判题盖掉**：标记之后又有判题
+// 撞上它（`still_open` 或同 key 再提），说明改的没管用，这条回到没人接——不然一条复测通过后又
+// 重新打开的 bug 会因为身上还挂着旧标记，永远不回待修清单。
+// 第三条是为了让清单跟着人走：全都打了「改了，等复测 / 等下次判题验证」的那道题，等的是复测或重跑，不是等人修——
 // 留在待修里，修的人每轮都要重新筛一遍，清单越长越没人看。
+const inHand = (f) => f.fix_mark === "claimed_fixed" && !f.fix_mark_superseded;
 const needFix = [];
 if (KIND === "fix" || KIND === "both") {
   const traceIds = [...runsByRecord.values()].flat().map((r) => r.traceId).filter(Boolean);
   // 批注一次问全（findAllAnnotationsByContent 自己分块翻页），别一道题一个请求
   const interactions = traceIds.length ? await findAllAnnotationsByContent(traceIds) : new Map();
+  // 判题表的快照（同一条诊断判多次时每一次一份，§15.6）与诊断时间；server 还没有这两张表时退回批注表与 trace 开始时刻
+  const recordsWithRuns = records.filter((rec) => (runsByRecord.get(rec.id) ?? []).some((r) => r.traceId)).map((rec) => rec.id);
+  const layers = await caseHistoryOfRecords(recordsWithRuns);
   for (const rec of records) {
-    const runs = (runsByRecord.get(rec.id) ?? []).filter((r) => r.traceId);
+    const runs = asJudgedRuns(runsByRecord.get(rec.id) ?? []);
     if (!runs.length) continue;
-    const rounds = priorJudgments(
-      runs.map((r) => ({ experiment: { id: r.experimentId, name: r.experimentName, created_at: r.experimentCreatedAt }, traceId: r.traceId })),
-      interactions,
-    ).filter((r) => r.judged !== false);
+    const rounds = priorJudgments(runs, interactions, layers).filter((r) => r.judged !== false);
     if (!rounds.length) continue;
     const open = openFindings(rounds);
-    if (!open.length || !open.some((f) => f.fix_mark !== "claimed_fixed")) continue;
+    if (!open.length || open.every(inHand)) continue;
     needFix.push({
       recordId: rec.id,
       prompt: rec.input?.prompt ?? "",
       // 最新判过那一轮的 trace：修复标记要打在**挖出这条问题的 trace** 上，而 fix-run 领的是最新那一轮
       traceId: rounds[rounds.length - 1].trace_id,
       openKeys: open.map((f) => f.key),
+      // 每条的修复标记显示成什么字（没有标记的为 null；被之后的诊断撞上过的标记不作数，也为 null）
+      openItems: open.map((f) => ({
+        key: f.key, class: f.class,
+        mark: f.fix_mark && !f.fix_mark_superseded ? fixMarkLabel(f.class, { status: f.fix_mark, data: f.fix_data, verify: f.fix_verify }) : null,
+      })),
     });
   }
 }
@@ -171,7 +183,8 @@ if (KIND === "judge" || KIND === "both") {
 }
 if (KIND === "fix" || KIND === "both") {
   console.log(`\n判过、还有没关的问题：${needFix.length} 条` + (needFix.length ? "" : "（都修完了或都等着复现）"));
-  for (const r of needFix) console.log(`  ${r.recordId}  ${one(r.prompt, 40)}  ${r.openKeys.length} 条：${r.openKeys.slice(0, 3).join(" · ")}${r.openKeys.length > 3 ? " …" : ""}`);
+  const keyText = (it) => (it.mark ? `${it.key}（${it.mark}）` : it.key);
+  for (const r of needFix) console.log(`  ${r.recordId}  ${one(r.prompt, 40)}  ${r.openItems.length} 条：${r.openItems.slice(0, 3).map(keyText).join(" · ")}${r.openItems.length > 3 ? " …" : ""}`);
   if (needFix.length) {
     console.log(`\n  ↳ 修它们（一次一道题，在交互会话里跑 fix-run）：`);
     console.log(`     node scripts/llmobs/fix-context.mjs --record <上面的 record id> --dataset ${DATASET}`);

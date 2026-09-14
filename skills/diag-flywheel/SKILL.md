@@ -66,7 +66,7 @@ node $S/llmobs/judge-package-export.mjs --experiment <run 名或 uuid> --out ./p
 
 包是自包含的(判题方不能回头追问,所以材料一次给全):`manifest.json` + 判题 skill 正文 +
 每例的 `trace.json` / `forward.md`(正向假设树)/ `reverse.md` / `ground-truth.md` / `probe.json` /
-`prior-judgments.json`(这道题之前几轮提过的改进点与修复标记——判这一轮要逐条复验还没关的)。
+`prior-judgments.json`(比这一例那次诊断更早的诊断提过的改进点与修复标记——判这一例要逐条复验还没关的;这条 trace 自己提的不算)。
 
 判卷口径在本插件的 **`diag-judge`** skill（`skills/diag-judge/SKILL.md`,导包时会拷一份进 `./pkg/skill/`）。
 能连上 server 就直接在会话里说「判一下这条 trace <trace_id>」——在线判是默认,判官会去活系统主动查证;
@@ -81,10 +81,13 @@ node $S/llmobs/judge-package-import.mjs --package ./pkg --annotator <判题模�
 (`findings.items`,每条带稳定 key,只分两类:确定是 bug——判官自己核实了是确定性的,交判定链 / 要人定——说法会误导、缺能力、题目有问题、看不出是不是 bug,交全部上下文),
 之前几轮提过的写复验(`findings.checks`);一段话塞好几处改动、或 2026-09-11 之前的「可信 / 要修 / 蒙对」词表,import 会整包拒。
 
-修完一条问题(修复走 `fix-run` skill,以用例为维度),先打标记再重跑验证(标记是声明,复验才是判决):
+修完一条问题(修复走 `fix-run` skill,以用例为维度):部署、判断历史数据、在挖出它的那次诊断的原窗口复测,再打标记。
+确定是 bug 的复测通过即关;其余的由之后更晚跑出来的诊断复验说了算(标记是声明,复验才是判决):
 
 ```bash
-node $S/llmobs/fix-mark.mjs --trace <挖出它的 trace_id> --key <改进点 key> --status claimed_fixed --note "改了什么" --by <谁>
+node $S/llmobs/fix-mark.mjs --trace <挖出它的 trace_id> --key <改进点 key> --status claimed_fixed \
+  --data unaffected|repaired|unrepairable [--verify passed|failed] --note "改了什么;原窗口重放拿到什么" --by <谁>
+# --data:数据没受影响 / 已修复 / 修不回来;--verify 只跟 claimed_fixed 走,数据修不回来的不带
 # 改不动:--status needs_human --note "要人做什么";决定不修:--status wont_fix --note "为什么"
 ```
 
@@ -97,7 +100,8 @@ node $S/llmobs/fix-mark.mjs --trace <挖出它的 trace_id> --key <改进点 key
 ### ④ 去控制台看
 
 - **用例集**:「历次」一次运行一行,「判题」同一行写那一次判成什么;点开看这道题的**改进点**——
-  每条带类别、状态(没修好 / 改了等复验 / 要人协助 / 不修 / 修好了),修没修好只看后续轮次的复验,能修的带「修这一条,重跑验证」的指令
+  每条带类别、状态(没修好 / 改了，等复测 / 复测通过 / 复测没过 / 数据修不回来，等下次诊断和判题时验证 / 改了，等下次判题验证 / 要人协助 / 不修 / 修好了),
+  修没修好看复测与之后更晚跑出来的诊断的复验;要不要再跑、从哪一步跑,在页面上点「复现 / 诊断 / 判题」
 - **用例诊断日志**:每行带判题结果 chip 与所属轮次,可筛「只看未判 / 只看有 dbdog 要修的 / 只看要人看的」
 - **跑批页**:run 列表与对比
 

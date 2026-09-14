@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { openFindings } from "./lib/judge-quality.mjs";
+import { openFindings, isBeforeDiagnosis } from "./lib/judge-quality.mjs";
 import {
   baseUrl, findProject, loadDataset,
   listAnnotationQueues, upsertAnnotationQueue, listAnnotationLabels, replaceAnnotationLabels,
@@ -36,9 +36,10 @@ import {
 } from "./lib/exp-client.mjs";
 import {
   LABEL_SCHEMA, QUEUE_NAME, renderForward, renderReverse, renderGroundTruth,
-  hasGroundTruth, rootSpanOf, stampOf, priorJudgments,
+  hasGroundTruth, rootSpanOf, stampOf, priorJudgments, diagnosisTimeOf,
 } from "./lib/judge-package.mjs";
-import { runsOfRecords } from "./lib/dataset-traces.mjs";
+import { runsOfRecords, asJudgedRuns } from "./lib/dataset-traces.mjs";
+import { caseHistoryOfRecords } from "./lib/case-diag-client.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const argOf = (name, dflt) => {
@@ -137,14 +138,14 @@ if (recordsReason) console.error(`⚠ 反向证据链本轮全缺：${recordsRea
 
 const { queueID, labels } = await ensureQueue(project.id);
 
-// 之前几轮：这一包里每道题在**本轮之前**跑过的运行，连同它们的批注一次取齐。
-// 修没修好由后续轮次复验说了算（飞轮设计 §13.3），判题方得先看到之前提过哪些条目。
+// 之前几次诊断：这一包里每道题的全部运行，连同批注、判题表快照、诊断时间一次取齐；
+// 每一例再按**这一例那次诊断**截出更早的（§15.5：时间轴是诊断时间，同一条 trace 自己的不算）。
+// 修没修好由后续诊断的复验说了算（飞轮设计 §13.3），判题方得先看到之前提过哪些条目。
 const packRecordIDs = [...new Set(events.map((e) => e.dataset_record_id).filter(Boolean))];
-const priorRunsByRecord = new Map();
-for (const [rid, list] of await runsOfRecords({ projectID: project.id, recordIDs: packRecordIDs })) {
-  priorRunsByRecord.set(rid, list.filter((r) => r.traceId && r.experimentId !== run.id && r.experimentCreatedAt < (run.created_at ?? "")));
-}
-const priorInteractions = await findAllAnnotationsByContent([...priorRunsByRecord.values()].flat().map((r) => r.traceId));
+const runsByRecord = new Map();
+for (const [rid, list] of await runsOfRecords({ projectID: project.id, recordIDs: packRecordIDs })) runsByRecord.set(rid, asJudgedRuns(list));
+const priorInteractions = await findAllAnnotationsByContent([...runsByRecord.values()].flat().map((r) => r.traceId));
+const caseLayers = await caseHistoryOfRecords(packRecordIDs);
 
 fs.mkdirSync(path.join(OUT, "cases"), { recursive: true });
 fs.mkdirSync(path.join(OUT, "skill"), { recursive: true });
@@ -201,19 +202,20 @@ for (const summary of events) {
     missing.push("ground-truth（**题坏了**：expected_output 里没有根因，本例 verdict 只能填 unknown）");
   }
 
-  const prior = priorJudgments(
-    (priorRunsByRecord.get(recordID) ?? []).map((r) => ({
-      experiment: { id: r.experimentId, name: r.experimentName, created_at: r.experimentCreatedAt },
-      traceId: r.traceId,
-    })),
-    priorInteractions,
-  );
+  const allRounds = priorJudgments(runsByRecord.get(recordID) ?? [], priorInteractions, caseLayers);
+  // 这一例那次诊断的时间：诊断表 / trace 开始时刻（priorJudgments 已按这个次序取好）；这条 trace 不在运行里就用 event 时刻
+  const thisDiagnosis = {
+    traceId: traceID,
+    diagnosedAt: diagnosisTimeOf(allRounds.find((r) => r.trace_id === traceID))
+      || (summary.timestamp_ms ? new Date(summary.timestamp_ms).toISOString() : (run.created_at ?? "")),
+  };
+  const prior = allRounds.filter((r) => isBeforeDiagnosis(r, thisDiagnosis));
   fs.writeFileSync(path.join(caseDir, "prior-judgments.json"), JSON.stringify(prior, null, 1));
 
   // **待复验清单随包走**：rubric 要判题方「开判第一件事就是拿这份清单」，但判题会话的
   // 工作目录是这个临时包，里面既没有 `case-history.mjs` 也没有凭证——照 rubric 做不到，
   // 只能退回「自己在几十条历史里推」，正是那条规则要取代的做法。这里把脚本算好的结果放进包。
-  const open = openFindings(prior);
+  const open = openFindings(allRounds, { before: thisDiagnosis });
   fs.writeFileSync(path.join(caseDir, "open-findings.json"), JSON.stringify(open, null, 1));
   if (open.length) console.error(`  · 待复验 ${open.length} 条：${open.map((o) => o.key).join("、")}`);
 
