@@ -26,6 +26,14 @@ export function investigationIssues(inv, { final = false, report = "" } = {}) {
   const branch = new Map(inv.branches.map(b => [b.hypothesis, b]));
   const declared = new Set(inv.events.map(e => e.id));
   for (const d of inv.diagnostics) if (d.code === "invalid_event" && !declared.has(d.event_id)) add(`${d.event_id}: ${d.problem ?? "invalid event; inspect the recording schema"}`);
+  if (!final) {
+    for (const d of inv.diagnostics) {
+      if (d.code === "invalid_event_json") add(`${d.span_id}: investigation block is not valid JSON; none of its records were accepted. Correct its JSON using the original intended records.`);
+      if (d.code === "duplicate_observation") add(`${d.observation}: this observation ID is already saved; repeating it does not replace its sources. Use a new observation ID, then new updates and finish referencing the correction.`);
+      if (d.code === "unknown_check") add(`${d.observation}: referenced check ${d.check} is undeclared; record the actual check purpose or correct the association.`);
+    }
+    for (const o of os.values()) for (const s of o.sources.filter(s => !s.matched)) add(`${o.id}/${s.ref}: quote was not verified in the original result. Copy a short contiguous exact excerpt, without paraphrase, calculations or added ellipses. This observation is already saved: use a NEW observation ID for corrected sources and point subsequent judgments to it. Put interpretation in summary/links, not quote.`);
+  }
   for (const b of branch.values()) {
     if (!hs.has(b.hypothesis)) add(`${b.hypothesis}: branch exists but hypothesis is undeclared; emit hypothesis with its actual scoped claim`);
     for (const p of b.parents) if (p !== "question" && !hs.has(p)) add(`${p}: undeclared parent hypothesis`);
@@ -49,6 +57,7 @@ export function investigationIssues(inv, { final = false, report = "" } = {}) {
       const o = os.get(id);
       if (!o) add(`${h.id}: missing observation ${id}`);
       else if ((!o.sources.length || o.sources.some(s => !s.matched)) && !boundary) add(`${h.id}/${id}: source linkage is unverified; repair from the actual result or record a scoped gap`);
+      if (o?.check && !inv.checks.some(c => c.id === o.check)) add(`${h.id}/${id}: referenced check ${o.check} is undeclared; record the actual check or use a corrected observation with the right association`);
     }
     if (decision.reference_check === "incomplete" && !boundary) add(`${h.id}: latest judgment has incomplete references or interpretations; re-link evidence to the current claim and emit a new update`);
   }
@@ -74,6 +83,6 @@ export function deliveryFeedback(spans, report, previous = {}) {
   // Bound automatic correction. A failed delivery remains explicitly incomplete;
   // the runner must surface it rather than accepting it as a normal completed run.
   const state = { status: "incomplete", attempts: attempts + 1, issues };
-  const reason = `dbdog investigation delivery needs repair (structure/references/report only; this does not verify causality).\n${issues.slice(0, 20).map(x => "- " + x).join("\n")}\nRepair using existing actual results and the recovery command; do not repeat database calls just to fill fields, invent references/claims, or erase contradictory history. A branch is not a hypothesis declaration. Re-emit rejected events with the same id; use new event ids for subsequent judgments and finish. Return the five-section human report separately from record blocks. If evidence/linkage is unavailable, record the specific gap and limit the answer. Reassess whether answered or evidence_boundary is appropriate.`;
+  const reason = `dbdog investigation delivery needs repair (structure/references/report only; this does not verify causality).\n${issues.slice(0, 20).map(x => "- " + x).join("\n")}\nRepair using existing actual results and the recovery command; do not repeat database calls just to fill fields, invent references/claims, or erase contradictory history. A branch is not a hypothesis declaration. Re-emit schema-rejected events with the same id. An accepted observation is immutable even when its quote fails: use a NEW observation ID with a short contiguous exact quote from the original result (no paraphrase, calculations or added ellipses), then NEW updates and finish referencing it. Repeating the old observation ID cannot repair it. Interpretation belongs in summary/links. Return the five-section human report separately from record blocks. If evidence/linkage is actually unavailable, record the specific gap and limit the answer; a mismatched quote does not make available tool text unavailable. Reassess whether answered or evidence_boundary is appropriate.`;
   return { state, output: attempts < 3 ? { decision: "block", reason } : { systemMessage: `dbdog: automatic delivery repair exhausted; delivery is INCOMPLETE. ${reason}` } };
 }
