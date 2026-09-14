@@ -61,6 +61,30 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|Bash|mcp__dbdog.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/ABSOLUTE/PATH/TO/dbdog-client-kit/claude-code-hooks/post-tool-evidence.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Read|Grep|Glob|Bash|mcp__dbdog.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"/ABSOLUTE/PATH/TO/dbdog-client-kit/claude-code-hooks/post-tool-evidence.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }

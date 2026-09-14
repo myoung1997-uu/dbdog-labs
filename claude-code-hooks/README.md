@@ -279,6 +279,21 @@ mcp 不双写、不上报，跟没装一样）：
 `spans.jsonl` 扩展名是 `.jsonl`，天然不在状态文件（`.json`）的扫描范围内——补发要靠它
 回捞，任何情况下都不得删。
 
+## 结构化调查记录
+
+服务端 `dbdog/investigation-recording` 定义模型事件协议；本地 `investigation-events.mjs` 解析它。
+`PostToolUse` / `PostToolUseFailure` 用实际调用 ID 返回证据引用，只补充上下文，不修改工具结果或权限。
+插件注册与手工 settings 片段均包含该 hook。需使用含此改动的插件/脚本版本，新会话才能取得引用。
+执行前被拒的调用可能不触发结果 hook；这时只记录实际缺口，不伪造引用。
+
+SessionEnd 的图对象在原有字段之外保存 `investigation`：显式假设与修订、关系和条件组、观察解释、
+状态历史、所有失败取证以及调查结束原因。对精确引用和结果原文做机械检查；声明状态始终标记为
+模型判断。活动轨迹没有 finish 事件时保持 active，不根据模型停止输出或节点支持状态推断完成。
+
+新记录直接用显式源码证据，不再调用另一个模型从正文猜测。无新事件的历史 trace 沿用旧解析器。
+JSON 与本地 Markdown 保留完整语义；旧控制台通过兼容节点/调用字段展示基础路径，尚不渲染条件组
+和独立关系状态。源码调用与 MCP 调用共享实际引用；兼容 MCP 序号仍只数 MCP，不把本地读取混入。
+
 ## 已知限制
 
 - **pending 记录本身丢了的救不回来**：2026-08-09 之前的 `user-prompt-submit.mjs` 每轮
@@ -289,3 +304,12 @@ mcp 不双写、不上报，跟没装一样）：
   已移除的 `input_local`）。读侧已全部流式，不再受文件大小威胁；但收尸要按 id 回捞就依赖它，
   不能随便删。轮转（归档到子目录、活跃文件名不变）待做，需同步语料仓 `llmobs-ingest.py`、
   span-graph `hypothesis-graph.mjs`、dbdog-web 三处消费者。
+
+### 调查阶段结果与验证边界
+
+`dbdog/investigate` 定义专业取证交付与整体调查决策，`dbdog/investigation-recording` 定义模型事件格式。
+checkpoint 保存当前问题、范围、阶段发现、未解问题与下一动作；记录不要求为定位建立假设。
+工具执行事实自动保留，模型为影响解释或路线的缺口补充语义。
+`reference_check` 为 matched / incomplete / not_provided；旧 `evidence_complete` 仅作布尔兼容。
+校验引用身份、原文和先后依赖；修订后的主张不能直接沿用旧解释，关系端点修订也会使旧关系解释过期。
+这些检查不证明因果真伪、样本代表性或答案充分性。无引用能力可继续用实际可访问的证据调查，不能伪造 E 引用。

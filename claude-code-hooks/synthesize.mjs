@@ -4,6 +4,7 @@
 // 无法被 import 复用，只能整段搬家。
 import fs from "node:fs";
 import { hypothesisTags } from "./hypothesis.mjs";
+import { toolUseSpanId } from "./evidence-reference.mjs";
 import { capField, deriveSpanId } from "./lib.mjs";
 
 /**
@@ -206,7 +207,7 @@ export function synthesize({ lines, traceId, sessionId, parentId, mlApp, pending
         // 随机 id 会让"同一批行被合成两遍"变成两条不同键的 span，读侧折不掉。
         const spanId = subAgentId
           ? deriveSpanId(traceId, `tool:${subAgentId}`)
-          : deriveSpanId(traceId, `tool_use:${b.tool_use_id}`);
+          : toolUseSpanId(traceId, b.tool_use_id);
 
         // 子代理的总开销：toolUseResult 里现成就有，不打上去等于白扔——有了它们，
         // 不展开子树就能看出这个子代理烧了多少。走 tags（字符串）而非 tokens_* 一等

@@ -10,6 +10,7 @@
 // 本地 spans.jsonl 全量字段 output_local / thinking_local 优先（读侧口径 x_local ?? x），server 导出只有截断后的 output。
 import fs from "node:fs";
 import path from "node:path";
+import { buildInvestigation, projectInvestigation, renderInvestigation } from "./investigation-events.mjs";
 import {
   HEAD,
   ID,
@@ -390,7 +391,9 @@ export function build(spans, { sourceEvidence = {}, sourceVerdict = {} } = {}) {
   // ordered 已按 ts 排序、没 ts 的排在最前，所以取最后一条**有 ts** 的；一条都没有就是 null。
   const withTs = ordered.filter((s) => s.ts != null);
   const coveredThrough = withTs.length ? withTs[withTs.length - 1].ts : null;
-  return {
+  const investigation = buildInvestigation(ordered);
+  const result = {
+    ...(investigation ? { investigation } : {}),
     trace_ids: [...traces].sort(),
     span_count: spans.length,
     covered_through: coveredThrough,
@@ -422,6 +425,7 @@ export function build(spans, { sourceEvidence = {}, sourceVerdict = {} } = {}) {
       source_without_evidence: nodeList.filter((n) => n.basis === "source" && n.calls.length === 0).length,
     },
   };
+  return projectInvestigation(result, ordered);
 }
 
 /** markdown 里的节选长度；报错的调用返回全文（上限 4000）。全量在 forward-path.json。 */
@@ -591,7 +595,7 @@ export function renderMd(g) {
     lines.push("");
   }
   if (!g.unattached_tools.length) lines.push("- 无", "");
-  return lines.join("\n");
+  return lines.join("\n") + (g.investigation ? "\n" + renderInvestigation(g.investigation) : "");
 }
 
 /** 存进 server 的紧凑形（2026-09-10）：去掉每次调用的 input/output 与 edges 上的 intent 全文，只留 span_id 引用；
@@ -603,7 +607,7 @@ export function compactGraph(g) {
     calls: n.calls.map(({ input, output, intent, ...rest }) => rest),
   }));
   const edges = g.edges.map(({ intent, ...rest }) => rest);
-  return { graph_version: GRAPH_VERSION, trace_ids: g.trace_ids, span_count: g.span_count, covered_through: g.covered_through ?? null, tool_call_count: g.tool_call_count,
+  return { graph_version: GRAPH_VERSION, ...(g.investigation ? { investigation: g.investigation } : {}), trace_ids: g.trace_ids, span_count: g.span_count, covered_through: g.covered_through ?? null, tool_call_count: g.tool_call_count,
     tool_call_count_all: g.tool_call_count_all, nodes, edges, unattached_tools: g.unattached_tools.map(({ input, output, intent, ...rest }) => rest), summary: g.summary };
 }
 
