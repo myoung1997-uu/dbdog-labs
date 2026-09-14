@@ -159,21 +159,52 @@ export function pendingIds(pending) {
  *   DBDOG_OBS_API_KEY     dbdog API key（控制台 settings/api-keys 签发）
  *   DBDOG_OBS_REPORT_TIMEOUT_MS  上报超时，见 reportTimeoutMs()
  */
+/**
+ * Build bounded upload requests without truncating an individual span. These are
+ * client batching targets, not copies of server limits. A span larger than the
+ * target is sent alone; an actual server rejection remains a failed delivery.
+ */
+export function* spanUploadBodies(spans, { targetBytes = 1 << 20, maxCount = 100 } = {}) {
+  let rows = [], bytes = Buffer.byteLength('{"spans":[]}');
+  for (const span of spans) {
+    const row = JSON.stringify(spanForUpload(span));
+    const size = Buffer.byteLength(row);
+    if (rows.length && (rows.length >= maxCount || bytes + size + 1 > targetBytes)) {
+      yield '{"spans":[' + rows.join(',') + ']}';
+      rows = [];
+      bytes = Buffer.byteLength('{"spans":[]}');
+    }
+    bytes += size + (rows.length ? 1 : 0);
+    rows.push(row);
+  }
+  if (rows.length) yield '{"spans":[' + rows.join(',') + ']}';
+}
+
 export async function reportSpans(spans) {
   const url = process.env.DBDOG_OBS_REPORT_URL?.trim();
   const key = process.env.DBDOG_OBS_API_KEY?.trim();
   if (!url || !key || !spans.length) return false;
+  let delivered = true;
+  // One total deadline: batching must not multiply the interactive hook timeout.
+  const signal = AbortSignal.timeout(reportTimeoutMs());
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "DD-API-KEY": key },
-      // `*_local` 是纯本地全量字段（见 capField）：远端只收 contentCap 截断后的正文。
-      body: JSON.stringify({ spans: spans.map(stripLocal) }),
-      signal: AbortSignal.timeout(reportTimeoutMs()),
-    });
-    return response.ok;
+    for (const body of spanUploadBodies(spans)) {
+      if (signal.aborted) return false;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "DD-API-KEY": key },
+        body,
+        signal,
+      });
+      if (!response.ok) delivered = false;
+      // Release the connection for the following batch; response content is not
+      // evidence and must not replace the spans that were actually collected.
+      await response.arrayBuffer();
+    }
+    // The caller retains IDs on any partial failure; replay is idempotent by span
+    // identity, so already accepted rows can safely be resent with the failed ones.
+    return delivered;
   } catch {
-    // best-effort：上报不可达不影响本地沉淀
     return false;
   }
 }
@@ -190,16 +221,15 @@ export function reportTimeoutMs() {
   return Number.isFinite(n) && n > 0 ? n : 3000;
 }
 
-/** 内容截断上限（对齐 mcp 的 DBDOG_TELEMETRY_OUTPUT_CHARS 先例，默认 8000）。 */
+/** 本地兼容预览长度；原文另存 *_local，上报恢复完整字段。 */
 export function contentCap() {
   const n = Number(process.env.DBDOG_OBS_CONTENT_CHARS ?? "");
   return Number.isFinite(n) && n > 0 ? n : 8000;
 }
 
 /**
- * 本地全量、上报截断（2026-09-08）：正文字段远端只收 contentCap 截断值；超限时本地多落一份
- * `<field>_local` 全量副本（未超限不落，读侧统一 `x_local ?? x`）。hook 只采原文不做语义
- * 解析——提取（假设「提出」事件等）在处理侧做，处理侧因此必须拿得到全文。
+ * Preserve a compact local preview plus the complete value when needed. Existing
+ * local readers use x_local ?? x; upload restores the full original into x.
  */
 export function capField(field, s) {
   if (typeof s !== "string") return { [field]: null };
@@ -207,9 +237,13 @@ export function capField(field, s) {
   return s.length > c ? { [field]: s.slice(0, c), [`${field}_local`]: s } : { [field]: s };
 }
 
-/** 剥掉所有 `*_local` 字段——上报前调用，远端 schema 不变、带宽不浪费。 */
-export function stripLocal(span) {
-  return Object.fromEntries(Object.entries(span).filter(([k]) => !k.endsWith("_local")));
+/** Upload the original content under server fields, without duplicate local-only keys. */
+export function spanForUpload(span) {
+  const wire = Object.fromEntries(Object.entries(span).filter(([key]) => !key.endsWith("_local")));
+  for (const field of ["input", "output", "thinking"]) {
+    if (typeof span[`${field}_local`] === "string") wire[field] = span[`${field}_local`];
+  }
+  return wire;
 }
 
 export function cap(s) {

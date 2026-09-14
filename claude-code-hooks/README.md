@@ -126,11 +126,11 @@ tail -3 ~/.claude/dbdog-obs/spans.jsonl # 应有 kind:"agent"(root) 与 kind:"ll
   不阻塞 Stop（用户零等待）、后写赢；未配/失败 = 没总结，不影响 trace。设计见
   `dbdog-web/docs/design/llmobs-investigation-narrative.md`。
 - **假设图**（2026-09-10）：SessionEnd 在本 trace 收尾后 detached 起后台 `graph-worker.mjs`，读本 trace 的
-  span 出图写到 `<DBDOG_OBS_DIR>/graphs/<trace_id>/forward-path.{md,json}` + `forward-conclusion.md`（本地全量，
+  span 出图写到 `<DBDOG_OBS_DIR>/graphs/<trace_id>/forward-path.{md,json}` + `forward-conclusion.md`；有显式调查记录时同目录另有 `hypothesis-view.json` 和 `investigation-steps.json`（本地全量，
   含每次调用入参/返回）；配了上报 env 时，再把**紧凑形**的图（去掉每次调用的 input/output/intent、
   `graph_version:1`）挂在 root span 上随 root 同键重发到 server——图会随 root span 推到 server（server
   存 root 行的 `graph` 列），web 读 `GET /api/v2/llmobs/trace/{id}/graph`，不再各自从 span 现算。
-  失败只在同目录 `graph-worker.log` 留一行，不影响 trace。图只统计 dbdog（MCP）工具调用：`seq` 是 dbdog
+  失败只在 `<DBDOG_OBS_DIR>/graph-worker.log` 留一行，不影响 trace。兼容投影只统计 dbdog（MCP）工具调用：`seq` 是 dbdog
   调用的序号（从 1 起连续），Grep/Read/Bash 等本地工具不进图、只在 summary 里计次
   （`local_tools_excluded` / `local_tools_excluded_by_name`）。SessionEnd 先出图后上报——本地落盘一完成就起
   graph worker，网络上报排在后面；Claude Code 给 hook 的 30s 预算被慢链路吃掉、hook 被 "Hook cancelled"
@@ -139,9 +139,12 @@ tail -3 ~/.claude/dbdog-obs/spans.jsonl # 应有 kind:"agent"(root) 与 kind:"ll
   server 判「图落后于 span」用它跟该 trace 的 span 水位 `max(ts)` 比——两端都是事件时间。别按入库时间比：
   先出图后上报意味着图必然先于尾部 span 入库，那样判会一律 stale，可图的内容其实是全的
   （出图读的是本地 `spans.jsonl`，尾部 span 已经落盘）。
+- **显式调查记录**：assistant 的 `dbdog-investigation` 事件先保存在实际客户端 transcript，再由 hook 写入 spans。`investigation.hypotheses` 保存节点，`branches` 保存追问边，`relations` 保存独立因果/条件关系；两种视图同源，结构化记录可以引用本地源码读取结果，不能套用上述兼容投影的“只计 MCP”规则。
+- **调查中恢复**：`recover-investigation.mjs <session_id> <实际主transcript路径>` 读取已落盘 spans 与主 transcript 尾部，在 `<DBDOG_OBS_DIR>/investigations/<trace_id>/` 写出恢复视图；不推进 hook 游标、不上报，未完成子代理的尾部可能尚缺。默认目录由 `lib.mjs` 的 `obsDir()` 决定，勿猜测会话路径。
+- **原始 spans 上报**：将本地完整 `input_local/output_local/thinking_local` 恢复为 server 的 `input/output/thinking`，再移除本地辅助键。按实际 UTF-8 JSON 字节及条数分批，同一轮发送共用超时预算；部分失败保留本轮 IDs 供现有补发机制重试，已接收行按身份幂等。目标批大小不是单条 span 的截断上限，单条过大仍完整尝试发送；MCP/server 的 5 MiB 接收限制若拒绝它，保留本地记录与 pending，不能宣称已送达。
+- **图上报边界**：server 单图上限 1 MiB。当前完整 investigation 连同事件/摘录进入 compactGraph，长调查可能超限；图上报失败仅写日志，没有独立图重试队列。本地完整记录仍在，不等于远端完整图已送达。
 - env：`DBDOG_OBS_DIR`（状态/产物目录）、`DBDOG_OBS_SPANS`（spans 路径）、
-  `DBDOG_OBS_CONTENT_CHARS`（**上报侧**内容截断，默认 8000，对齐 `DBDOG_TELEMETRY_OUTPUT_CHARS`
-  先例；本地 `spans.jsonl` 不受它约束，超限字段另落 `<字段>_local` 全量副本，见「span 形状」）、
+  `DBDOG_OBS_CONTENT_CHARS`（本地兼容预览长度，默认 8000；超限字段另落 `<字段>_local` 全量，上报恢复原始内容，见「span 形状」）、
   `DBDOG_OBS_ML_APP`（应用名标签，打进 root/llm span 的 `tags.ml_app`；缺省 = 项目目录名。
   复盘按它过滤——同一台机器上编码会话与真诊断靠它分开）、
   `DBDOG_OBS_REPORT_TIMEOUT_MS`（上报超时，默认 3000；透明代理/隧道后的机器放宽到
@@ -224,19 +227,15 @@ mcp 不双写、不上报，跟没装一样）：
 任务级 in/out 在 root span，子代理级在其 agent span。`duration_ms` 是近似值
 （前一条 entry 落盘 → 组内末行落盘），打 `duration_estimated` 标区分。
 
-**本地全量、上报截断（2026-09-08）**。原则：hook 只采原文、不做语义解析，提取（假设
-「提出」事件等）在处理侧做，所以本地 `spans.jsonl` 必须有全文：
+**已采集的原始 span 字段本地与上报均保留完整内容（2026-09-14）**。原始 span 与派生假设图是两个对象，图不能替代原始执行记录：
 
-| 字段 | 远端（上报） | 本地 `spans.jsonl` |
+| 字段 | 远端（上报成功后） | 本地 `spans.jsonl` |
 |------|------|------|
-| llm `output`、tool `input`/`output`、agent `input`/`output` | 按 `DBDOG_OBS_CONTENT_CHARS` 截断 | 超限时另落 `<字段>_local` 全量；未超限不落副本 |
-| llm `thinking_local` | 无此字段 | transcript 的 thinking 块全文（有才落） |
-| llm `input` | 恒 null | 恒 null——每轮完整 prompt = 之前全部对话，处理侧按 trace 内时间序从各 span 正文复原即可 |
+| llm `output`、tool `input`/`output`、agent `input`/`output` | 完整原文 | 预览超限时另落 `<字段>_local` 全量；未超限不落副本 |
+| llm `thinking` | 已采集 thinking 块全文 | 同样保留预览与必要的 `thinking_local` 全文 |
+| llm `input` | 恒 null | 恒 null——没有重新拼接每轮完整模型请求；此前消息可从已有 spans 回看，但未采集的 system prompt/CLAUDE.md 不能补造 |
 
-读侧口径统一 **`x_local ?? x`**。所有 `*_local` 字段 `reportSpans` 上报前剥离，远端 schema
-不动。此前的 `input_local`（每轮上下文尾部快照，2026-08-10 引入）已移除：内容全是前面 span
-正文的重复拼接，实测占本地文件 70%（254MB / 362MB）。系统提示与 CLAUDE.md 不在 transcript
-里，本地也没有——这是既有的近似声明。
+本地读侧仍使用 **`x_local ?? x`**；`spanForUpload` 在发送时恢复完整值到已有 server 字段，移除 `*_local` 键，远端 schema 不变。完整原始 span 是指当前采集器实际记录的字段，不等于完整模型 API 请求快照。历史已截断的远端 span 不会自动补全；可用本地原始记录补发，不能凭图或摘要补写原文。
 
 ## 已知语义（读侧须知）
 
@@ -279,6 +278,21 @@ mcp 不双写、不上报，跟没装一样）：
 `spans.jsonl` 扩展名是 `.jsonl`，天然不在状态文件（`.json`）的扫描范围内——补发要靠它
 回捞，任何情况下都不得删。
 
+## 结构化调查记录
+
+服务端 当前引擎的 `dbdog/dbm-<engine>/investigation-recording` 定义模型事件协议；本地 `investigation-events.mjs` 解析它。
+`PostToolUse` / `PostToolUseFailure` 用实际调用 ID 返回证据引用，只补充上下文，不修改工具结果或权限。
+插件注册与手工 settings 片段均包含该 hook。需使用含此改动的插件/脚本版本，新会话才能取得引用。
+执行前被拒的调用可能不触发结果 hook；这时只记录实际缺口，不伪造引用。
+
+SessionEnd 的图对象在原有字段之外保存 `investigation`：显式假设与修订、关系和条件组、观察解释、
+状态历史、所有失败取证以及调查结束原因。对精确引用和结果原文做机械检查；声明状态始终标记为
+模型判断。活动轨迹没有 finish 事件时保持 active，不根据模型停止输出或节点支持状态推断完成。
+
+新记录直接用显式源码证据，不再调用另一个模型从正文猜测。无新事件的历史 trace 沿用旧解析器。
+JSON 与本地 Markdown 保留完整语义；旧控制台通过兼容节点/调用字段展示基础路径，尚不渲染条件组
+和独立关系状态。源码调用与 MCP 调用共享实际引用；兼容 MCP 序号仍只数 MCP，不把本地读取混入。
+
 ## 已知限制
 
 - **pending 记录本身丢了的救不回来**：2026-08-09 之前的 `user-prompt-submit.mjs` 每轮
@@ -289,3 +303,43 @@ mcp 不双写、不上报，跟没装一样）：
   已移除的 `input_local`）。读侧已全部流式，不再受文件大小威胁；但收尸要按 id 回捞就依赖它，
   不能随便删。轮转（归档到子目录、活跃文件名不变）待做，需同步语料仓 `llmobs-ingest.py`、
   span-graph `hypothesis-graph.mjs`、dbdog-web 三处消费者。
+
+### 调查阶段结果与验证边界
+
+当前引擎的 investigate 定义专业结果接纳与整体调查决策，当前引擎的 `dbdog/dbm-<engine>/investigation-recording` 定义模型事件格式。
+checkpoint 保存当前问题、范围、阶段发现、未解问题与下一动作；记录不要求为定位建立假设。
+工具执行事实自动保留，模型为影响解释或路线的缺口补充语义。
+`reference_check` 为 matched / incomplete / not_provided；旧 `evidence_complete` 仅作布尔兼容。
+校验引用身份、原文和先后依赖；修订后的主张不能直接沿用旧解释，关系端点修订也会使旧关系解释过期。
+这些检查不证明因果真伪、样本代表性或答案充分性。无引用能力可继续用实际可访问的证据调查，不能伪造 E 引用。
+
+### 假设路径、步骤与恢复
+
+追问 branch 与因果 relation 分开记录；主树顶部使用 checkpoint 的问题，缺失父关系或追问环显示记录诊断。
+显式记录同时生成 `hypothesis-view.json` 与 `investigation-steps.json`；构建不使用模型推断关系。旧 intent 只供历史兼容。
+调用 `node claude-code-hooks/recover-investigation.mjs <实际session_id> <实际主transcript路径>` 可恢复进行中的调查。
+脚本只读 span 与主 transcript 游标后的完整行，写视图快照；不改变 hook 游标、不发网络请求或重查数据库。
+输入可从 PostToolUse 返回的 recovery 信息取得。尚未落盘的子代理尾部可能缺失，恢复结果明确给出覆盖边界。
+
+
+### 从原始 span 解析假设图
+
+```bash
+node claude-code-hooks/graph.mjs /path/to/spans.jsonl --trace TRACE_ID --out /path/to/report
+```
+
+不访问模型或数据库。读取实际 assistant 事件与工具结果；stdout 返回文件路径，`investigation_summary` 统计明确记录的节点、追问边、独立关系和缺口。多个 trace 不允许混画；无显式事件的历史记录继续输出兼容图，不伪造新协议节点。
+
+显式记录额外输出 `investigation.html`、`hypothesis-view.json`、`investigation-steps.json`。HTML 可直接离线打开：点击假设查看证据入口、原始工具输入/返回、状态和修订历史；切换调查步骤查看检查目的、结果及判断变化。共享节点与多父边保留，因果/条件关系单列。未关联、引用缺口及结束后重开的调查均显式展示。HTML 含被引用的原始取证内容；完整原始 spans 不因过滤展示而丢弃，也不将 HTML 上传到 server。
+
+SessionEnd 与恢复命令通过同一 `writeGraph` 自动生成这些文件。线上控制台仍需另行接入两份结构化视图；本改动交付离线查看入口。
+
+人工协议演示（不是生产采样或诊断效果证明）：
+
+```bash
+node claude-code-hooks/examples/investigation-demo.mjs > /tmp/dbdog-demo-spans.jsonl
+node claude-code-hooks/graph.mjs /tmp/dbdog-demo-spans.jsonl --out /tmp/dbdog-investigation-preview
+open /tmp/dbdog-investigation-preview/investigation.html
+```
+
+演示从锁等待/连接占用深入事务生命周期与支付调用，保留 CPU 反证、共享持锁原因及支付端证据边界。官方方法参考及本地协议的自研边界，见 dbdog-web `docs/dd-corpus/official/bits-investigation-graph-2026-09-14.md`。

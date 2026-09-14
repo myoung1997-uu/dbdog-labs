@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import {
   baseUrl, findProject, loadDataset,
   listAnnotationQueues, upsertAnnotationQueue, listAnnotationLabels, replaceAnnotationLabels,
-  addAnnotationInteractions, listAllExperimentEvents, getExperimentEvent, getTrace,
+  addAnnotationInteractions, listAllExperimentEvents, getExperimentEvent, getTrace, getTraceGraph,
   resolveExperimentRef,
   requireCredential,
 } from "./lib/exp-client.mjs";
@@ -162,7 +162,18 @@ for (const summary of events) {
     missing.push("trace（event 没有 trace_id——那次跑批 hooks 没生效或超时被杀）");
   }
 
-  fs.writeFileSync(path.join(caseDir, "forward.md"), renderForward(spans, { eventId: eventID, traceId: traceID }));
+  // 派生视图用于导航，原始 trace 仍独立保留；无法取图不能中止其余判题材料交付。
+  let investigationGraph = null;
+  fs.rmSync(path.join(caseDir, "investigation.json"), { force: true });
+  if (traceID && spans.length) {
+    try {
+      investigationGraph = await getTraceGraph(traceID);
+      if (investigationGraph?.status === "ok" && investigationGraph.trace_id === traceID) {
+        fs.writeFileSync(path.join(caseDir, "investigation.json"), JSON.stringify(investigationGraph, null, 1));
+      }
+    } catch (err) { console.error(`· ${eventID} 派生图不可用，保留原始 trace：${err.message}`); }
+  }
+  fs.writeFileSync(path.join(caseDir, "forward.md"), renderForward(spans, { eventId: eventID, traceId: traceID, investigationGraph }));
 
   const recordID = event?.dataset_record_id || summary.dataset_record_id || "";
   const record = records.get(recordID);

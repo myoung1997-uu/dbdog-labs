@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { obsDir, readState, reportSpans, run, scanSpans } from "./lib.mjs";
 import { build, compactGraph, dedupe, writeGraph } from "./hypothesis-graph.mjs";
+import { extractInvestigationEvents } from "./investigation-events.mjs";
 import { sourceEvidenceCandidates } from "./source-evidence.mjs";
 import { buildSourceEvidencePrompt, parseSourceEvidenceReply } from "./source-evidence-prompt.mjs";
 import { mapWithBudget } from "./budget.mjs";
@@ -41,6 +42,9 @@ export function graphDir(traceId) {
  * 单次请求的超时压成「当下剩余预算」与 summary.mjs 自己那 30s 里的小值——不让一条吃光整份。
  */
 async function collectSourceEvidence(spans, note) {
+  // 显式记录已带精确来源，不调用另一个模型重新猜测源码证据或状态。
+  const recording = extractInvestigationEvents(spans);
+  if (recording.events.length || recording.diagnostics.length) return { sourceEvidence: {}, sourceVerdict: {}, tried: 0, got: 0 };
   const cands = sourceEvidenceCandidates(spans);
   if (!cands.length) return { sourceEvidence: {}, sourceVerdict: {}, tried: 0, got: 0 };
   const env = summaryEnv();

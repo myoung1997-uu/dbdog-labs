@@ -452,13 +452,8 @@ describe("Stop hook span synthesis", () => {
   });
 });
 
-// —— 本地全量、上报截断（2026-09-08）——
-// 原则：hook 只采原文不做语义解析，提取放处理侧。本地 spans.jsonl 是真相源，正文一律全量；
-// 上报侧维持 contentCap 截断。超限的字段在本地多落一份 `<字段>_local`（未超限不落副本，
-// 读侧统一 `x_local ?? x`）；thinking 没有上报字段，只有 thinking_local。
-// 任何 `*_local` 字段 reportSpans 前剥离。旧的 input_local（每轮上下文尾部快照）整段移除：
-// 它的内容全是前面 span 已有正文的重复拼接，实测占本地文件 70%。
-describe("本地全量、上报截断", () => {
+// 本地保留兼容预览与完整内容，上报恢复原始字段；不恢复历史上下文滚动缓冲。
+describe("原始 span 本地与上报均保留完整内容", () => {
   function longTranscript(dir, { text, thinking, args, result, prompt = "诊断: 为什么卡住" }) {
     return writeTranscript(dir, "t.jsonl", [
       { type: "user", timestamp: T("00.000"), message: { role: "user", content: prompt } },
@@ -484,7 +479,7 @@ describe("本地全量、上报截断", () => {
     ]);
   }
 
-  it("llm span 的 thinking 走 capField：截断值上报、全量留本地（2026-09-12 服务端有列了）", () => {
+  it("llm span 的 thinking 保留本地预览和完整值", () => {
     const dir = tempObsDir();
     const transcript = longTranscript(dir, { text: "先看进程", thinking: "T".repeat(30), args: { command: "ls" }, result: "ok" });
     seedState(dir, "s1", transcript);
@@ -496,7 +491,7 @@ describe("本地全量、上报截断", () => {
     // 文本块 + tool_use 名字标记（既有语义）；本用例 contentCap=10，读侧口径 x_local ?? x
     expect(llm.output_local ?? llm.output).toBe("先看进程\n[tool_use: Bash]");
     // 此前这里断言 thinking 恒 undefined（「没有上报字段」）。服务端 2026-09-12 加了 thinking 列
-    // （蓝图 0036），改走 capField——截断值随 span 上报，整条推理过程不再只能在开发机上查。
+    // （蓝图 0036），capField 的本地预览仍可短于完整内容，上报恢复完整字段。
     expect(llm.thinking).toBe("T".repeat(10)); // contentCap=10
   });
 
@@ -548,7 +543,7 @@ describe("本地全量、上报截断", () => {
     expect(root.output_local).toBe("C".repeat(30));
   });
 
-  it("*_local 字段一律不上报：本地 JSONL 有，sink 没有", async () => {
+  it("上报原始完整内容，使用 server 字段名且不重复发送 *_local 键", async () => {
     const dir = tempObsDir();
     const sink = await startSpanSink();
     try {
@@ -571,7 +566,11 @@ describe("本地全量、上报截断", () => {
       for (const s of sink.received) {
         expect(Object.keys(s).filter((k) => k.endsWith("_local")), `${s.kind} 上报包不得带本地字段`).toEqual([]);
       }
-      expect(sink.received.find((s) => s.kind === "llm").output).toBe("A".repeat(10));
+      expect(sink.received.find((s) => s.kind === "llm").output).toBe("A".repeat(30) + "\n[tool_use: Bash]");
+      expect(sink.received.find((s) => s.kind === "llm").thinking).toBe("T".repeat(30));
+      const remoteTool = sink.received.find((s) => s.kind === "tool");
+      expect(remoteTool.input).toBe(JSON.stringify({ command: "x".repeat(30) }));
+      expect(remoteTool.output).toBe("R".repeat(30));
     } finally {
       await sink.close();
     }

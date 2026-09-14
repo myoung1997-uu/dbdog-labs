@@ -1,68 +1,40 @@
 ---
 name: span-graph
-description: hook span 转假设图/树。输入 dbdog-obs hook 产出的 spans.jsonl 文件、server 导出的 span JSON,或含 spans.jsonl 的目录,输出正向假设图 markdown(假设↔假设父子、假设↔工具调用、收口、出现顺序、未挂到假设的调用、源码来源的假设有没有现场证据)。零模型,秒出。装了 dbdog-agent-obs 插件的会话在 SessionEnd 会自动出一份,本 skill 用于按需重出或对历史 span 出图。触发词:span-graph / 正向 / 假设图 / span 转图 / span 转树。
+description: 从 dbdog hook 的明确调查记录生成假设视图与调查步骤，或恢复进行中的阶段状态；支持 spans.jsonl、server 导出与历史 intent 记录。保持追问关系、因果关系和引用检查的语义边界，不重新诊断或猜测缺失关联。
 ---
 
-# span-graph —— 从 hook span 重构诊断实际走的路
+# 从记录还原调查
 
-零模型、纯格式化重构:读 span 上已有的假设标注,长出「实际走的路」。产物是一份 markdown(附同名 .json),之后由人拿它与 evidence-chain 的产物做对比;本 skill 到产出为止,不做对比、不调模型、不重跑诊断。
+本能力负责重建与交付视图。调查推进由当前引擎的托管 investigate skill 定义，事件格式由 当前引擎的 `dbdog/dbm-<engine>/investigation-recording` 定义；本 skill 不另立假设协议、不宣布根因。
 
-## 先看有没有现成的
+## 选择记录
 
-装了 dbdog-agent-obs 插件的会话,trace 收尾(SessionEnd)时 hook 会自动出图:
+用户给定 trace、session 或文件时使用该范围。输入支持 `spans.jsonl`、包含它的目录，以及 server 导出的 span JSON。整库日志包含多个调查时先确认目标，不能把不同 trace 拼成一棵树。
 
-```
-~/.claude/dbdog-obs/graphs/<trace_id>/forward-path.md        (Windows: %USERPROFILE%\.claude\dbdog-obs\graphs\…)
-```
+安装插件后，SessionEnd 会生成 `<DBDOG_OBS_DIR>/graphs/<trace_id>/forward-path.md`；未设置目录时使用 `~/.claude/dbdog-obs/`。已有产物可直接读取，但需对照其覆盖时间，不能把上次产物当成最新状态。
 
-设了 `DBDOG_OBS_DIR` 的话在那个目录下的 `graphs/`。失败留痕在同目录 `graph-worker.log`。用户要「刚才那次的假设图」,先找这里,没有再手动出。
+进行中的长调查或上下文丢失时，用 hook 提供的真实 session/transcript 路径调用 `claude-code-hooks/recover-investigation.mjs`。它读取已持久化 span 与主 transcript 未处理尾部，不推进 hook 游标、不查询数据库、不上报网络。返回最新阶段结果、假设状态、记录缺口和产物路径；尚未落盘的子代理尾部可能不完整，应保留这项覆盖限制。
 
-## 输入
+## 构建与交付
 
-- 文件:一份 `spans.jsonl`(hook 每行一个 span),或 server 导出的 `{"spans":[...]}` / JSON 数组
-- 目录:里面有 `spans.jsonl` 就用它;也可以直接给 `~/.claude/dbdog-obs/`(整份日志,用 `--trace` 或 `--session` 筛出那一次诊断)
-
-span 来自 dbdog-obs hook:装好 hook 后发「诊断:」+ 题面,跑完 span 落在 `~/.claude/dbdog-obs/spans.jsonl`(Windows 是 `%USERPROFILE%\.claude\dbdog-obs\spans.jsonl`)。**想让每次诊断的 span 落到自己的目录**,开 Claude Code 前设 `DBDOG_OBS_DIR=<用例目录>`。
-
-假设格式由 dbdog-mcp 的 `telemetry.intent` 参数描述定义(随 tools/list 到达任何客户端),不需要往题面里贴约定;agent 不按 `[H2<H1]` 写的调用,图里落到「未挂到假设」。
-
-## 用法
-
-`S` 指本 skill 的 `scripts` 目录。只要 Node(装插件本来就有),没有 Python 依赖。
+本 skill 的脚本目录记为 `S`；通过现有入口执行：
 
 ```bash
-node S/from_spans.mjs 路径/spans.jsonl
-node S/from_spans.mjs 某次输出目录
-node S/from_spans.mjs ~/.claude/dbdog-obs/spans.jsonl --trace <trace_id> --out 输出目录
+node S/from_spans.mjs 路径/spans.jsonl --trace 实际trace_id --out 输出目录
 ```
 
-产物默认写在输入旁(目录形态写在该目录里):`forward-path.md` + `forward-path.json` + `forward-conclusion.md`(被测 agent 的最终回答原文)。
+输出 `forward-path.json` / `forward-path.md` 及实际最终回答 `forward-conclusion.md`。显式事件记录另生成：
 
-## 用户在会话里怎么说,你(Claude)怎么接
+- `hypothesis-view.json`：调查问题根、假设内容/状态/判定摘要/关键证据入口、明确追问边、单独的因果/条件关系、最终答案引用。
+- `investigation.html`：可离线打开的假设图与调查步骤，点击节点展开检查、证据原文、判断和修订历史；共享父方向保留，因果关系独立展示。包含所引用的原始工具内容，不依赖网络资源。
+- `investigation-steps.json`：检查目的与目标、结果及引用、对假设的影响、状态变化、阶段交付和结束事件。
 
-- 「正向,把刚才这次的出图」→ 当前 trace_id 在 `~/.claude/dbdog-obs/<session_id>.json` 的 `trace_id` 字段;先看 `graphs/<trace_id>/forward-path.md` 在不在,在就直接贴假设树部分;不在(会话还没结束)就 `--trace <id>` 手动出。
-- 「正向,span 文件在 <路径>\spans.jsonl,出假设图」→ 直接跑 `from_spans.mjs <路径>`,产物写在同目录;把假设树部分贴给用户,并点出未声明的假设、没 [H..] 头的调用、源码来源却没有现场证据的假设各有几处。
-- 「正向,用 dbdog-obs 里最近一次诊断的 span,输出到 <单号目录>」→ 读 spans.jsonl,取 ts 最新的 trace_id,`--trace <id> --out <单号目录>`。
-- 用户给的是目录 → 直接传目录,脚本自己找里面的 spans.jsonl。
+两份 JSON 视图及 HTML 来自同一事件模型。命令 stdout 返回产物路径；结构化计数读取 `investigation_summary`，`summary` 是历史兼容图口径。交付时指出记录的覆盖范围、未解问题及结构/引用缺口；不要以树更深、节点更多或没有 diagnostics 作为诊断成功的证据。
 
-不要自己解析 span 编树,也不要调模型总结;这个 skill 的产物就是脚本出的 markdown。
+## 呈现边界
 
-## 图怎么长
+主树中只有问题和可检验解释；检查、原始结果、解释与缺口放在可展开详情。追问父子边不代表已证明因果，兄弟不默认互斥。共享节点可从多个父方向引用，仍共用身份、状态和证据；不能为了单父布局删掉关系。
 
-`tags.hypothesis_id` / `parent_hypothesis_id` 优先,否则解析 intent 的 `[H2<H1] type=…; claim=…; expect=…; close=…; intent=…; basis=…; code_ref=…`(英文键为准,中文键 类型/假设/判据/关/意图 仍认;与 hook 的 hypothesis.mjs、dbdog-web 控制台同一套规则)。markdown 里有:
+不从编号、自由文本 intent、调用顺序、agent 嵌套或因果 explains 边补造追问边。缺失关联显示为未关联节点；被反驳或修订的节点和原文记录保留。模型声明与 reference_check、assessment_current 分开显示，引用匹配不等于归因正确。
 
-- 假设树:缩进 = 父子;每个假设下面一张表,列出该假设名下的工具调用(seq 是 dbdog(MCP)工具调用的序号、从 1 起连续,Grep/Read/Bash 等本地工具不进图、只在概览里计次;时间、主会话或哪个子代理、工具、意图、状态)
-- 源码来源的假设(`basis=source`)单独标出它有没有现场取证调用——没有的按约定只能算假设,不能进结论
-- 假设出现顺序
-- 假设收口(`close=` 谁在第几步关了谁;结论正文 How do we know 结尾的 hypothesis ledger 也认)
-- 未挂到假设的调用,分三类如实标出、不编造:**未声明的假设**(只被 `[H2.1<H2]` 或 `close=` 引用、没有调用以 `[H2]` 开头,通常是「Propose [H2]」写在正文里);**intent 写了字段但没 `[H..]` 头**(agent 没守约定,附原文);**不带 intent 的本地工具**(Bash/Read/Agent 派发等,按工具名计数)
-
-## 文件
-
-```
-SKILL.md
-scripts/from_spans.mjs            入口(透传到 claude-code-hooks/graph.mjs)
-references/hypothesis-format.md   假设一行的格式速查(定义单源是 dbdog-mcp 的 telemetry.intent 描述)
-```
-
-实现与测试在插件的 `claude-code-hooks/hypothesis-graph.mjs` / `hypothesis-graph.test.mjs`。
+具体 schema 不在此重复；读取 `references/hypothesis-format.md` 了解协议入口与历史兼容边界。实现由插件 `claude-code-hooks/investigation-events.mjs`、`investigation-views.mjs` 与 `hypothesis-graph.mjs` 共同提供；不另写一个自由文本推断器。
