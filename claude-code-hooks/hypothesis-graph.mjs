@@ -2,14 +2,15 @@
 //
 // 2026-09-10 从 skills/span-graph/scripts/from_spans.py 移植过来并成为**唯一实现**：
 // hook 在 SessionEnd 用它自动出图（graph-worker.mjs），span-graph skill 的入口
-// （skills/span-graph/scripts/from_spans.mjs）也只是调用本文件。解析走 hypothesis.mjs，
-// 英文键为准、中文键兼容，与 dbdog-web/src/lib/llmobs-hypothesis-tree.ts 同一套正则。
+// （skills/span-graph/scripts/from_spans.mjs）也只是调用本文件。显式事件解析走 investigation-events.mjs，
+// 两种结构化视图走 investigation-views.mjs；hypothesis.mjs 的 intent/正文正则仅保留历史兼容投影。
 //
 // 输入：spans.jsonl（每行一个 span）/ server 导出 {"spans":[...]} / JSON 数组 / 含 spans.jsonl 的目录。
 // 正文「Propose [H2] …」事件：hook 只采原文不做语义解析，父节点文本从 llm/agent span 的正文提——
-// 本地 spans.jsonl 全量字段 output_local / thinking_local 优先（读侧口径 x_local ?? x），server 导出只有截断后的 output。
+// 本地 spans.jsonl 全量字段 output_local / thinking_local 优先（读侧口径 x_local ?? x），旧版 server 导出可能只有截断后的 output；新 hook 上报恢复完整字段。
 import fs from "node:fs";
 import path from "node:path";
+import { renderInvestigationHtml } from "./investigation-report.mjs";
 import { buildInvestigation, projectInvestigation, renderInvestigation } from "./investigation-events.mjs";
 import {
   HEAD,
@@ -624,7 +625,7 @@ export function agentConclusion(spans) {
 
 /**
  * 出图：写 forward-path.json / forward-path.md / forward-conclusion.md 到 out 目录。
- * 返回 { md, json, summary }。spans 为空抛错（调用方决定怎么报）。
+ * 返回产物路径、兼容 summary 与显式记录的 investigation_summary。spans 为空抛错。
  */
 export function writeGraph(spans, out, source = {}, opts = {}) {
   if (!spans.length) throw new Error("没有读到 span（检查路径 / --trace / --session）");
@@ -635,21 +636,34 @@ export function writeGraph(spans, out, source = {}, opts = {}) {
   const mp = path.join(out, "forward-path.md");
   fs.writeFileSync(jp, `${JSON.stringify(g, null, 2)}\n`);
   fs.writeFileSync(mp, renderMd(g));
+  const files = { md: mp, json: jp };
   if (g.investigation?.views) {
+    files.html = path.join(out, "investigation.html");
+    files.hypothesis_view = path.join(out, "hypothesis-view.json");
+    files.investigation_steps = path.join(out, "investigation-steps.json");
+    fs.writeFileSync(files.html, renderInvestigationHtml(g.investigation, spans, source));
     fs.writeFileSync(path.join(out, "hypothesis-view.json"), JSON.stringify(g.investigation.views.hypothesis_view, null, 2) + "\n");
     fs.writeFileSync(path.join(out, "investigation-steps.json"), JSON.stringify(g.investigation.views.investigation_steps, null, 2) + "\n");
+  }
+  // 同一路径重新生成时，不让历史结构化视图冒充本次结果。
+  if (!g.investigation?.views) {
+    for (const file of ["investigation.html", "hypothesis-view.json", "investigation-steps.json"]) fs.rmSync(path.join(out, file), { force: true });
   }
   const concl = agentConclusion(spans);
   if (concl) {
     fs.writeFileSync(path.join(out, "forward-conclusion.md"), `# 被测 agent 的最终回答（root span output 原文）\n\n${concl.trim()}\n`);
   }
-  return { md: mp, json: jp, summary: g.summary };
+  if (!concl) fs.rmSync(path.join(out, "forward-conclusion.md"), { force: true });
+  const v = g.investigation?.views?.hypothesis_view;
+  return { ...files, summary: g.summary, ...(v ? { investigation_summary: { hypotheses: v.nodes.length, investigation_parent_edges: v.edges.length, relations: v.relations.length, observations: g.investigation.observations.length, diagnostics: g.investigation.diagnostics.length } } : {}) };
 }
 
 /** CLI 与 skill 共用：path 可以是文件或目录；out 缺省写在输入旁（目录形态写在该目录里）。 */
 export function run(input, { out, session, trace } = {}) {
   const src = resolveInput(input);
   const spans = loadSpans(src, { session, trace });
+  const traces = new Set(spans.map(s => s.trace_id).filter(Boolean));
+  if (traces.size > 1) throw new Error("输入包含多个 trace；请用 --trace 选择一次调查，不能混合构图");
   const isDir = fs.existsSync(input) && fs.statSync(input).isDirectory();
   const dest = out ?? (isDir ? input : path.dirname(path.resolve(src)) || ".");
   return writeGraph(spans, dest, { file: path.resolve(src), session: session ?? null, trace: trace ?? null });

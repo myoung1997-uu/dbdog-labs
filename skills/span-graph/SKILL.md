@@ -26,9 +26,10 @@ node S/from_spans.mjs 路径/spans.jsonl --trace 实际trace_id --out 输出目�
 输出 `forward-path.json` / `forward-path.md` 及实际最终回答 `forward-conclusion.md`。显式事件记录另生成：
 
 - `hypothesis-view.json`：调查问题根、假设内容/状态/判定摘要/关键证据入口、明确追问边、单独的因果/条件关系、最终答案引用。
+- `investigation.html`：可离线打开的假设图与调查步骤，点击节点展开检查、证据原文、判断和修订历史；共享父方向保留，因果关系独立展示。包含所引用的原始工具内容，不依赖网络资源。
 - `investigation-steps.json`：检查目的与目标、结果及引用、对假设的影响、状态变化、阶段交付和结束事件。
 
-两份视图来自同一事件模型。交付时指出记录的覆盖范围、未解问题及结构/引用缺口；不要以树更深、节点更多或没有 diagnostics 作为诊断成功的证据。
+两份 JSON 视图及 HTML 来自同一事件模型。命令 stdout 返回产物路径；结构化计数读取 `investigation_summary`，`summary` 是历史兼容图口径。交付时指出记录的覆盖范围、未解问题及结构/引用缺口；不要以树更深、节点更多或没有 diagnostics 作为诊断成功的证据。
 
 ## 呈现边界
 

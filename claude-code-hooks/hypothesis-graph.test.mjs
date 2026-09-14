@@ -431,7 +431,8 @@ describe("graph-worker · pushes the graph to the server on the root span", () =
     expect(root.span_id).toBe("tr9root");
     expect(root.graph.nodes[0].id).toBe("H1");
     expect(root.graph.nodes[0].calls[0]).not.toHaveProperty("output");
-    expect(root).not.toHaveProperty("output_local"); // stripLocal 照旧
+    expect(root).not.toHaveProperty("output_local");
+    expect(root.output).toBe("answer full"); // 原文恢复到 server 字段，图仍为独立派生对象
     expect(fs.readFileSync(path.join(dir, "graph-worker.log"), "utf8")).toContain("已推 root+graph");
   });
 });
